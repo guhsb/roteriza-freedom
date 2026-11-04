@@ -3,12 +3,17 @@ ROTEIRIZA FREEDOM  (programa do Windows)
 
 1) INSTALAR
    Descompacte a pasta Roteiriza em um lugar fixo (ex.: C:\Roteiriza) e abra Roteiriza.exe.
-   O programa abre o Roteiriza no navegador (http://127.0.0.1:47654). Fica uma janelinha do
-   programa na barra de tarefas: não feche enquanto estiver usando.
+   O programa abre na janela dele mesmo (igual ao de etiquetas): não abre navegador nem site.
+   Fechar a janela encerra o programa. Imprimir um romaneio abre ele de novo sozinho.
    Os dados ficam na pasta "dados", ao lado do Roteiriza.exe. Faça cópia dessa pasta de vez em quando.
+   - Precisa do "WebView2" do Windows (já vem no Windows 11 e na maioria dos Windows 10). Se faltar, o programa
+     abre a janela do Edge no modo aplicativo (sem barra de endereço) em vez de parar.
+   - Exportar (CSV, backup): abre a janela "Salvar como" do Windows.
+   - Imprimir rotas e financeiro: abre direto a caixa de impressão do Windows.
 
 2) IMPRESSORA "ROMANEIO FREEDOM"  (uma vez só, em cada computador)
-   Na janelinha do programa: "Instalar impressora Romaneio Freedom" > aceite a permissão de administrador.
+   Dentro do programa, no rodapé: "impressora e programa" > "Instalar impressora" > aceite a permissão
+   de administrador. (Também aparece um aviso amarelo no topo enquanto ela não estiver instalada.)
    Uso: no sistema, imprima o romaneio (Controle de Entrega) na impressora "Romaneio Freedom".
    O Roteiriza abre sozinho na tela de conferência, com os pedidos, endereços e o motorista. Confira e importe.
    Se o programa estiver fechado, imprimir o romaneio abre ele sozinho.
@@ -22,6 +27,21 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    Substitua os arquivos do .exe (Roteiriza.exe e a pasta _internal) sem mexer na pasta "dados".
 
 5) SE A IMPRESSORA NÃO ABRIR O ROMANEIO
-   - Veja se a janelinha mostra "Impressora Romaneio Freedom: instalada".
+   - Rodapé > "impressora e programa": veja se mostra "instalada".
    - Arquivo dados\instalacao_impressora.log mostra o que o instalador fez.
-   - O PDF impresso fica salvo em dados\romaneios (dá para importar à mão pelo botão "Importar romaneio (PDF)").
+   - O PDF impresso é MOVIDO da pasta dados\entrada para dados\romaneios (assim a impressora fica livre
+     para o próximo). Dá para importar à mão pelo botão "Importar romaneio (PDF)".
+   - Impressão presa em "Spooling" na fila de impressão? Cancele o documento, apague o romaneio.pdf que
+     sobrou em dados\entrada (se houver) e imprima de novo. Com o Roteiriza aberto, ele lê o PDF sozinho.
+
+6) VELOCIDADE
+   Os endereços são localizados no mapa enquanto você confere a tela, e os de clientes que já apareceram
+   antes ficam guardados (dados\\storage\\geoCache.json) e voltam na hora. Endereço novo leva cerca de 1 segundo
+   (limite do mapa gratuito), mas isso acontece enquanto você olha a tela.
+
+7) SE AINDA ESTIVER LENTO: dados\\leitura.log
+   Cada romaneio importado grava ali uma linha com o tempo de cada etapa (PDF gravado -> programa -> janela ->
+   leitura -> mapa -> importar). O mesmo resumo aparece na tela depois de importar (começa com "⏱").
+   Mande esse arquivo para ver exatamente onde o tempo vai.
+   DICA: deixe a janela do Roteiriza aberta (minimizada) durante o dia. Com ela aberta, a impressão chega em
+   cerca de 2 segundos; com o programa fechado, ele precisa abrir antes (alguns segundos a mais).

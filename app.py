@@ -1,105 +1,138 @@
-"""Roteiriza Freedom — programa do Windows.
+"""Roteiriza Freedom — programa do Windows (um .exe só, igual ao de etiquetas).
 
-Abre o Roteiriza no navegador (http://127.0.0.1:47654), guarda os dados na pasta 'dados'
-ao lado do .exe e lê os romaneios impressos na impressora virtual "Romaneio Freedom".
+Abre o Roteiriza na janela do próprio programa (motor do Windows embutido, sem Edge/Chrome, sem barra de
+endereço), guarda os dados na pasta 'dados' ao lado do .exe e lê os romaneios impressos na impressora
+virtual "Romaneio Freedom". Fechar a janela encerra o programa; imprimir um romaneio abre ele de novo.
 """
 import os
 import sys
-import threading
-import tkinter as tk
-import webbrowser
-from tkinter import messagebox, ttk
+import time
 
-import impressora_virtual
+import janela
 import servidor
 
-BG = "#F4F5F1"
-NAVY = "#141C2B"
+ESPERA_INICIAL = float(os.environ.get("ROTEIRIZA_ESPERA_INICIAL", 45))   # (modo navegador) tempo para a janela abrir
+FOLGA_JANELA_FECHADA = float(os.environ.get("ROTEIRIZA_FOLGA", 15))      # (modo navegador) janela fechou -> encerra
+FOLGA_NAVEGADOR_PADRAO = 90
+
+
+def webview2_instalado():
+    """O Windows tem o motor de janela (WebView2)? Vem no Windows 11 e na maioria dos Windows 10."""
+    try:
+        import winreg
+    except ImportError:
+        return False
+    guid = r"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    chaves = [(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\\" + guid),
+              (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\EdgeUpdate\Clients\\" + guid),
+              (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\EdgeUpdate\Clients\\" + guid)]
+    for raiz, caminho in chaves:
+        try:
+            with winreg.OpenKey(raiz, caminho) as k:
+                versao = winreg.QueryValueEx(k, "pv")[0]
+                if versao and versao != "0.0.0.0":
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def usar_webview():
+    if os.environ.get("ROTEIRIZA_SEM_WEBVIEW"):
+        return False
+    try:
+        import webview  # noqa: F401
+    except Exception:
+        return False
+    return webview2_instalado() if sys.platform == "win32" else True
+
+
+def rodar_webview(srv):
+    """Janela própria do programa. Bloqueia até a janela ser fechada."""
+    import webview
+
+    j = webview.create_window("Roteiriza Freedom", servidor.URL + "?app=1", width=1366, height=860,
+                              min_size=(1000, 640), maximized=True, text_select=True)
+
+    def trazer():
+        try:
+            j.restore()
+            j.show()
+            j.on_top = True          # força a janela para a frente (e solta em seguida)
+            j.on_top = False
+        except Exception:
+            pass
+
+    def salvar_como(nome, dados):
+        pasta = os.path.join(os.path.expanduser("~"), "Downloads")
+        tipo = webview.FileDialog.SAVE if hasattr(webview, "FileDialog") else webview.SAVE_DIALOG
+        destino = j.create_file_dialog(tipo, directory=pasta if os.path.isdir(pasta) else "", save_filename=nome)
+        if not destino:
+            return None
+        if isinstance(destino, (list, tuple)):
+            destino = destino[0]
+        with open(destino, "wb") as f:
+            f.write(dados)
+        return str(destino)
+
+    srv.trazer = trazer
+    srv.ao_chegar = lambda nome: trazer()           # chegou romaneio: a janela vem para a frente
+    srv.salvar_como = salvar_como
+    srv.sair_cb = lambda: j.destroy()
+    base = os.environ.get("LocalAppData") or os.path.expanduser("~")
+    storage = os.path.join(base, "RoteirizaFreedom", "webview")
+    os.makedirs(storage, exist_ok=True)
+    webview.start(private_mode=False, storage_path=storage)
+
+
+def rodar_navegador(srv):
+    """Plano B (sem o motor do Windows): janela do Edge/Chrome em modo aplicativo."""
+    def abrir():
+        srv.janela = janela.abrir(servidor.URL)
+    srv.abrir_janela = abrir
+    srv.trazer = abrir
+    abrir()
+    inicio = time.time()
+    while not srv.pedido_sair:
+        time.sleep(1)
+        if time.time() - inicio < ESPERA_INICIAL or srv.janela_viva():
+            continue
+        folga = FOLGA_JANELA_FECHADA if srv.janela is not None else FOLGA_NAVEGADOR_PADRAO
+        if time.time() - srv.ultimo_poll > folga:
+            break
+    if srv.janela_viva():
+        try:
+            srv.janela.terminate()
+        except OSError:
+            pass
 
 
 def main():
     modo_romaneio = "--romaneio" in sys.argv        # aberto pela tarefa agendada quando algo é impresso
     srv = servidor.Servidor()
 
-    if modo_romaneio and not srv.ha_novo():
-        return                                       # impressão de outra coisa (etiqueta, DANFE...): ignora
+    if modo_romaneio:
+        if servidor.em_uso():
+            return                                   # já aberto: ele mesmo pega o PDF
+        fim = time.time() + 3                        # dá um instante para o Windows terminar de gravar o PDF
+        while not srv.ha_novo() and time.time() < fim:
+            time.sleep(0.3)
+        if not srv.ha_novo():
+            return                                   # impressão de outra coisa (etiqueta, DANFE...): ignora
     try:
         srv.iniciar()
     except OSError:
-        # já existe um Roteiriza aberto (ele mesmo vai pegar o PDF); se foi o usuário, só traz a página
-        if not modo_romaneio:
-            webbrowser.open(servidor.URL)
+        servidor.pedir_frente()                      # já existe um Roteiriza aberto: só traz a janela dele
         return
 
-    raiz = tk.Tk()
-    raiz.title("Roteiriza Freedom")
-    raiz.configure(bg=BG)
-    raiz.geometry("440x330")
-    raiz.resizable(False, False)
-
-    status = tk.StringVar(value="Programa ativo.")
-    imp = tk.StringVar(value="Impressora Romaneio Freedom: verificando...")
-
-    tk.Label(raiz, text="Roteiriza Freedom", bg=BG, fg=NAVY, font=("Segoe UI", 16, "bold")).pack(pady=(16, 2))
-    tk.Label(raiz, text=servidor.URL, bg=BG, fg="#6B7280", font=("Segoe UI", 9)).pack()
-    tk.Label(raiz, textvariable=imp, bg=BG, fg=NAVY, font=("Segoe UI", 10)).pack(pady=(12, 0))
-    tk.Label(raiz, textvariable=status, bg=BG, fg="#0E7C7B", font=("Segoe UI", 10, "bold"),
-             wraplength=400).pack(pady=(4, 8))
-
-    def atualiza_impressora():
-        ok = impressora_virtual.impressora_instalada()
-        raiz.after(0, lambda: imp.set("Impressora Romaneio Freedom: " + ("instalada ✓" if ok else "NÃO instalada")))
-
-    def rodar_em_thread(fn, depois):
-        def alvo():
-            r = fn()
-            raiz.after(0, lambda: depois(r))
-        threading.Thread(target=alvo, daemon=True).start()
-
-    def instalar():
-        status.set("Aguardando a permissão de administrador...")
-        def fim(r):
-            status.set("")
-            threading.Thread(target=atualiza_impressora, daemon=True).start()
-            if "ERRO" in (r or ""):
-                messagebox.showerror("Instalar impressora", r)
-            else:
-                messagebox.showinfo("Instalar impressora",
-                                    'Pronto! No sistema, imprima o romaneio na impressora "Romaneio Freedom".')
-        rodar_em_thread(impressora_virtual.instalar, fim)
-
-    def remover():
-        if not messagebox.askyesno("Remover impressora", 'Remover a impressora "Romaneio Freedom"?'):
-            return
-        status.set("Aguardando a permissão de administrador...")
-        def fim(r):
-            status.set("")
-            threading.Thread(target=atualiza_impressora, daemon=True).start()
-        rodar_em_thread(impressora_virtual.remover, fim)
-
-    def fechar():
-        if messagebox.askyesno("Sair", "Fechar o Roteiriza?\nA página aberta no navegador deixa de salvar. "
-                                       "(Imprimir um romaneio abre o programa de novo sozinho.)"):
-            srv.parar()
-            raiz.destroy()
-
-    ttk.Button(raiz, text="Abrir o Roteiriza", command=lambda: webbrowser.open(servidor.URL)).pack(pady=3, ipadx=20)
-    ttk.Button(raiz, text="Instalar impressora Romaneio Freedom", command=instalar).pack(pady=3, ipadx=20)
-    ttk.Button(raiz, text="Remover impressora", command=remover).pack(pady=3, ipadx=20)
-    ttk.Button(raiz, text="Abrir pasta dos dados / backups",
-               command=lambda: os.startfile(servidor.pasta_dados()) if hasattr(os, "startfile") else None).pack(pady=3, ipadx=20)
-
-    def chegou(nome):
-        raiz.after(0, lambda: status.set(f"Romaneio recebido: {nome}"))
-    srv.ao_chegar = chegou
-
-    raiz.protocol("WM_DELETE_WINDOW", fechar)
-    threading.Thread(target=atualiza_impressora, daemon=True).start()
-    if modo_romaneio:
-        raiz.iconify()
-    else:
-        webbrowser.open(servidor.URL)
-    raiz.mainloop()
+    srv.atualizar_impressora()
+    try:
+        if usar_webview():
+            rodar_webview(srv)
+        else:
+            rodar_navegador(srv)
+    finally:
+        srv.parar()
 
 
 if __name__ == "__main__":

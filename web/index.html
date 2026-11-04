@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Roteiriza CWB</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 64 64%27%3E%3Crect width=%2764%27 height=%2764%27 rx=%2714%27 fill=%27%23EC4C8D%27/%3E%3Ctext x=%2732%27 y=%2747%27 font-size=%2742%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27Arial%27 font-weight=%27bold%27%3ER%3C/text%3E%3C/svg%3E">
+
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -401,6 +403,23 @@
 <footer>dados salvos automaticamente neste navegador · localização via OpenStreetMap</footer>
 
 <script>
+// ===== Modo janela do programa (motor do Windows embutido): sem pop-up, sem download por link =====
+window.__roteirizaWebview = /[?&]app=1\b/.test(location.search);
+function abrirExterno(url){
+  if(window.__roteirizaWebview){ fetch('/api/abrir-url', {method:'POST', headers:{'X-Roteiriza':'1'}, body:url}).catch(() => {}); }
+  else window.open(url, '_blank');
+}
+// imprime o HTML dentro da própria janela (iframe escondido) — não depende de abrir pop-up
+function imprimirPorIframe(html){
+  const antigo = document.getElementById('print-frame'); if(antigo) antigo.remove();
+  const f = document.createElement('iframe'); f.id = 'print-frame';
+  f.style.cssText = 'position:fixed; right:0; bottom:0; width:1px; height:1px; border:0; opacity:0; pointer-events:none;';
+  f.onload = () => { try{ f.contentWindow.focus(); f.contentWindow.print(); }catch(e){ alert('Não consegui abrir a impressão: ' + (e.message || e)); } };
+  f.srcdoc = html;
+  document.body.appendChild(f);
+}
+</script>
+<script>
 // ===== Modo programa (.exe): dados gravados na pasta "dados" ao lado do programa =====
 (function(){
   if(location.protocol !== 'http:') return;            // aberto como arquivo: segue usando o navegador
@@ -753,7 +772,7 @@ function extractStreetPart(cleanQuery){
 let lastGeoCall = 0;
 const GEO_MAX_ATTEMPTS = 3;
 const GEO_RETRY_DELAY_MS = 1500;
-async function geocodeUmaConsulta(query){
+async function geocodeUmaConsultaImpl(query){
   for(let attempt=1; attempt<=GEO_MAX_ATTEMPTS; attempt++){
     const wait = Math.max(0, 1050 - (Date.now() - lastGeoCall));
     if(wait > 0) await new Promise(r=>setTimeout(r, wait));
@@ -876,7 +895,7 @@ function variantesGeocode(query){
   const vistos = new Set();
   return v.filter(x => { const k = x.q.toLowerCase(); if(vistos.has(k)) return false; vistos.add(k); return true; });
 }
-async function geocode(query){
+async function geocodeEtapas(query){
   const vars = variantesGeocode(query);
   let reserva = null;
   for(const v of vars){
@@ -887,6 +906,62 @@ async function geocode(query){
     return g;
   }
   return reserva;
+}
+
+
+// ---------- cache de endereços + uma busca por vez ----------
+// O mapa gratuito só aceita 1 busca por segundo. Por isso: (1) as buscas entram numa fila única,
+// (2) tudo que já foi localizado fica guardado e volta na hora da próxima vez (cliente que se repete),
+// (3) localização corrigida à mão passa a valer para aquele endereço.
+let geoFila = Promise.resolve();
+function geocodeUmaConsulta(q){
+  const p = geoFila.then(() => geocodeUmaConsultaImpl(q));
+  geoFila = p.catch(() => {});
+  return p;
+}
+const GEO_CACHE_KEY = 'geoCache', GEO_CACHE_MAX = 4000;
+let geoCache = null, geoCacheP = null, geoCacheTimer = null;
+const geoEmVoo = new Map();
+const geoStats = {cache:0, rede:0, falha:0};
+const geoChave = q => normalizeAddrText(q);
+function geoCacheCarregar(){
+  return geoCacheP || (geoCacheP = (async () => {
+    let c = {};
+    try{ const r = await window.storage.get(GEO_CACHE_KEY); if(r) c = JSON.parse(r.value) || {}; }catch(e){ c = {}; }
+    try{   // aproveita o que já está nos pedidos: endereços localizados e os corrigidos à mão
+      (orders || []).forEach(o => {
+        if(o.lat == null || (o.geo !== 'ok' && o.geo !== 'manual')) return;
+        const k = geoChave(`${o.endereco}, ${o.cidade}, PR, Brasil`);
+        if(!c[k] || o.geo === 'manual') c[k] = {lat:o.lat, lon:o.lon, score:(o.geo === 'manual' ? 1 : o.geoScore), addressMatch:null, displayName:o.geoFoundAddress || '(já localizado)'};
+      });
+    }catch(e){}
+    geoCache = c; return c;
+  })());
+}
+function geoCacheSalvar(){
+  clearTimeout(geoCacheTimer);
+  geoCacheTimer = setTimeout(async () => {
+    try{
+      const ks = Object.keys(geoCache || {});
+      if(ks.length > GEO_CACHE_MAX) ks.slice(0, ks.length - GEO_CACHE_MAX).forEach(k => delete geoCache[k]);
+      await window.storage.set(GEO_CACHE_KEY, JSON.stringify(geoCache));
+    }catch(e){ console.warn('cache de endereços não salvou', e); }
+  }, 1500);
+}
+async function geoCacheGuardarManual(order){
+  const c = await geoCacheCarregar();
+  c[geoChave(`${order.endereco}, ${order.cidade}, PR, Brasil`)] = {lat:order.lat, lon:order.lon, score:1, addressMatch:null, displayName:'(localização manual)'};
+  geoCacheSalvar();
+}
+async function geocode(query, forcar){
+  const c = await geoCacheCarregar(), k = geoChave(query);
+  if(!forcar && c[k]){ geoStats.cache++; return {...c[k]}; }
+  if(!forcar && geoEmVoo.has(k)){ geoStats.cache++; const g = await geoEmVoo.get(k); return g ? {...g} : g; }
+  geoStats.rede++;
+  const p = geocodeEtapas(query);
+  geoEmVoo.set(k, p);
+  try{ const g = await p; if(g){ c[k] = g; geoCacheSalvar(); } else geoStats.falha++; return g ? {...g} : g; }
+  finally{ geoEmVoo.delete(k); }
 }
 
 const GEO_MIN_SCORE = 0.3;
@@ -933,6 +1008,7 @@ async function setManualLocation(orderId){
   if(!coords){ alert('Não consegui entender essa coordenada. Cole no formato "lat,lon" ou um link do Google Maps que mostre o pino do local.'); return; }
   order.lat = coords.lat; order.lon = coords.lon; order.geo = 'manual'; order.geoScore = 1;
   order.distKm = haversine(CURITIBA_CENTER.lat, CURITIBA_CENTER.lon, coords.lat, coords.lon);
+  geoCacheGuardarManual(order);
   await saveOrders();
   renderOrders();
   markRoutesStale();
@@ -1277,7 +1353,7 @@ document.getElementById('o-search').addEventListener('input', debounce((e)=>{
 async function retryGeocode(id){
   const order = orders.find(o=>o.id===id);
   if(!order) return;
-  const geo = await geocode(`${order.endereco}, ${order.cidade}, PR, Brasil`);
+  const geo = await geocode(`${order.endereco}, ${order.cidade}, PR, Brasil`, true);
   if(geo){
     applyGeocodeResult(order, geo);
   } else {
@@ -2307,7 +2383,7 @@ function shareRouteWhatsApp(driverId){
     }
   });
 
-  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, '_blank');
+  abrirExterno(`https://wa.me/?text=${encodeURIComponent(msg)}`);
 }
 
 // ---------- exportação CSV ----------
@@ -2907,6 +2983,7 @@ function buildFinanceiroPrintHtml(){
 // ... from frame with URL ..." que acontece ao rodar o arquivo direto do disco
 // (file://), já que um blob: URL nunca é igual à URL da própria página.
 function openPrintWindow(html){
+  if(window.__roteirizaWebview){ imprimirPorIframe(html); return; }
   const blob = new Blob([html], {type: 'text/html'});
   const url = URL.createObjectURL(blob);
   const w = window.open(url, '_blank');
@@ -3466,6 +3543,7 @@ function romaneioParse(pages){
   async function lerPDF(file){
     if(!window.pdfjsLib) return {ok:false, erro:'O leitor de PDF não carregou nesta página.'};
     try{
+      const t0 = performance.now();
       const data = new Uint8Array(await file.arrayBuffer());
       const doc = await pdfjsLib.getDocument({data}).promise;
       const pages = [];
@@ -3473,8 +3551,32 @@ function romaneioParse(pages){
         const tc = await (await doc.getPage(p)).getTextContent();
         pages.push(tc.items.map(i => ({s:i.str, x:i.transform[4], y:i.transform[5]})));
       }
-      return romaneioParse(pages);
+      const res = romaneioParse(pages); res.msPdf = Math.round(performance.now() - t0); return res;
     }catch(e){ console.error(e); return {ok:false, erro:'Não consegui abrir este PDF ('+(e && e.message || e)+').'}; }
+  }
+
+  // ---------- medição de tempo (como o "leitura.log" do programa de etiquetas) ----------
+  const seg = ms => (Math.max(0, ms) / 1000).toFixed(1).replace('.', ',') + ' s';
+  function resumoTempos(r, x){
+    const t = r.tempos || {};
+    const rede = geoStats.rede - x.geo0.rede, cache = Math.max(0, x.uniq - rede);   // endereços diferentes - buscas feitas na rede
+    const ateTela = t.mtime ? t.tela - t.mtime : (t.inicio ? t.tela - t.inicio : null);
+    const det = [];
+    if(t.mtime && t.capturado) det.push('PDF gravado→programa ' + seg(t.capturado - t.mtime));
+    if(t.capturado && t.recebido) det.push('programa→janela ' + seg(t.recebido - t.capturado));
+    det.push('leitura do PDF ' + seg(r.msPdf || 0));
+    const mapa = `mapa: ${rede} busca(s) na rede, ${cache} já guardada(s)` + (x.mapaFim ? ` (prontas ${seg(x.mapaFim - t.tela)} depois da tela abrir)` : ' (ainda buscando ao clicar)');
+    const curto = `⏱ ${ateTela != null ? seg(ateTela) + ' até a tela abrir (' + det.join(' · ') + ') · ' : ''}${mapa} · ao clicar Importar: ${seg(x.tFim - x.tClick)}`;
+    const longo = `romaneio ${r.cab.romaneio || '?'} | ${x.n} pedido(s) | ` + curto.replace('⏱ ', '');
+    return {curto, longo};
+  }
+  function registrarLeitura(txt){
+    if(!window.__roteirizaExe) return;
+    try{ fetch('/api/log', {method:'POST', headers:{'X-Roteiriza':'1'}, body:txt}).catch(() => {}); }catch(e){}
+  }
+  function consultaDe(p){
+    const cidade = cidadeBonita(p.cidade), endereco = p.rua + (p.bairro ? ` - ${p.bairro}` : '');
+    return {cidade, endereco, q:`${endereco}, ${cidade}, PR, Brasil`};
   }
   function cidadeBonita(c){
     const n = semAcento(c);
@@ -3514,16 +3616,24 @@ function romaneioParse(pages){
         <div class="rom-sub">${esc(nomeArquivo||'')} · saída ${esc(dataBR(cab.dataSaida))} · ${r.paradas.length} entrega(s) · R$ ${formatValorBR(totalVal)}</div>
         ${avisos}${bloqueioMotorista}
         <div class="rom-scroll"><table class="rom-tab"><thead><tr><th></th><th>Cliente</th><th>Endereço</th><th class="rom-r">Nº Doc</th><th class="rom-r">Valor</th></tr></thead><tbody>${linhas}</tbody></table></div>
-        <p class="rom-sub">Os endereços serão localizados no mapa ao importar (cerca de 1 segundo por pedido). Display e tamanho do pedido entram como "pequeno" — ajuste depois se precisar.</p>
+        <p class="rom-sub">Os endereços já estão sendo localizados no mapa enquanto você confere; os de clientes que já apareceram antes voltam na hora. Display e tamanho do pedido entram como "pequeno" — ajuste depois se precisar.</p>
         <div class="rom-actions"><button class="btn btn-ghost" id="rom-cancel">Cancelar</button><button class="btn btn-primary" id="rom-ok">Importar</button></div>
       </div>`;
       document.body.appendChild(ov);
-      const fechar = v => { ov.remove(); resolve(v); };
+      let cancelado = false, mapaFim = null, geoFim = null;
+      r.tempos = r.tempos || {}; r.tempos.tela = Date.now();
+      const geo0 = Object.assign({}, geoStats);
+      (async () => {   // localiza os endereços já enquanto você confere (os conhecidos voltam na hora)
+        for(const p of r.paradas){ if(cancelado) break; if(jaTem(p)) continue; try{ await geocode(consultaDe(p).q); }catch(e){} }
+        if(!cancelado){ mapaFim = Date.now(); geoFim = Object.assign({}, geoStats); }
+      })();
+      const fechar = v => { cancelado = true; ov.remove(); resolve(v); };
       const okBtn = ov.querySelector('#rom-ok');
       const contar = () => { const n = ov.querySelectorAll('tbody input:checked').length; okBtn.textContent = `Importar ${n} pedido(s)`; okBtn.disabled = n === 0; };
       ov.addEventListener('change', contar); contar();
       ov.querySelector('#rom-cancel').onclick = () => fechar(false);
       okBtn.onclick = async () => {
+        const tClick = Date.now();
         const sel = Array.from(ov.querySelectorAll('tbody input:checked')).map(c => r.paradas[+c.dataset.i]);
         okBtn.disabled = true; ov.querySelector('#rom-cancel').disabled = true;
         let motoristaId = null;
@@ -3540,8 +3650,7 @@ function romaneioParse(pages){
         let n = 0;
         for(const p of sel){
           n++; okBtn.textContent = `Importando ${n}/${sel.length}...`;
-          const cidade = cidadeBonita(p.cidade);
-          const endereco = p.rua + (p.bairro ? ` - ${p.bairro}` : '');
+          const {cidade, endereco} = consultaDe(p);
           const obs = [p.pedido ? `Pedido ${p.pedido}` : '', cab.romaneio ? `Rom. ${cab.romaneio}` : ''].filter(Boolean).join(' · ');
           await geocodeAndPushOrder({cliente:p.fantasia || p.razao, endereco, cidade, data:p.emissao, tamanho:'pequeno', tamanhoPedido:'pequeno', prioridade:'normal',
             motoristaId, codCliente:p.codCliente||'', vendedor:'', numDoc:p.numDoc, valTotal:p.valor, obs});
@@ -3552,6 +3661,9 @@ function romaneioParse(pages){
         renderAll(); markRoutesStale();
         const semLoc = orders.slice(antes).filter(o => o.geo === 'failed').length;
         setImportStatus(`✅ Romaneio ${cab.romaneio||''}: ${n} pedido(s) importado(s)${motoristaId?` para ${titulo(cab.motorista)}`:''}.` + (semLoc ? ` ⚠️ ${semLoc} sem localização no mapa — confira o endereço e use "tentar de novo".` : '') + ' Clique em "Gerar rotas" para ordenar as paradas.');
+        const resumo = resumoTempos(r, {tClick, tFim:Date.now(), mapaFim, geoFim, geo0, n, uniq:new Set(sel.map(p => geoChave(consultaDe(p).q))).size});
+        const box = $('import-status'); if(box) box.textContent += '  ' + resumo.curto;
+        registrarLeitura(resumo.longo);
         fechar(true);
       };
     });
@@ -3570,11 +3682,13 @@ function romaneioParse(pages){
     if(avisar){ document.title = '🖨️ Romaneio novo! · ' + tituloOriginal; beep(); try{ window.focus(); }catch(e){} }
     andarFila();
   }
-  async function importarArquivos(files, avisar){
+  async function importarArquivos(files, avisar, tempos){
     for(const f of files){
+      const inicio = Date.now();
       setImportStatus(`Lendo ${f.name}...`);
       const r = await lerPDF(f);
       if(!r.ok){ if(!avisar) setImportStatus('⚠️ ' + f.name + ': ' + r.erro); continue; }
+      r.tempos = Object.assign({inicio}, tempos || {});
       setImportStatus('');
       enfileirar(r, f.name, avisar);
     }
@@ -3652,6 +3766,11 @@ function romaneioParse(pages){
       })();
     }
   }
+  // aquece o leitor de PDF e a conexão com o mapa logo na abertura (a 1ª leitura do dia não paga esse custo)
+  setTimeout(async () => {
+    try{ if(window.pdfjsLib){ const d = await pdfjsLib.getDocument({data: Uint8Array.from(atob('JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAyMDAgMTAwXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAzOCA+PgpzdHJlYW0KQlQgL0YxIDEyIFRmIDIwIDUwIFRkIChSb21hbmVpbykgVGogRVQKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAowMDAwMDAwMjQxIDAwMDAwIG4gCjAwMDAwMDAzMjkgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgozOTkKJSVFT0YK'), c => c.charCodeAt(0))}).promise; await (await d.getPage(1)).getTextContent(); } }catch(e){}
+    try{ fetch('https://nominatim.openstreetmap.org/status.php?format=json', {mode:'no-cors'}).catch(() => {}); }catch(e){}
+  }, 1500);
   window.RomaneioImport = {lerPDF, importarArquivos, iniciar, varrer};
 })();
 
@@ -3717,24 +3836,41 @@ function romaneioParse(pages){
         const r = await fetch('/api/fila', {cache:'no-store'});
         if(r.ok){
           for(const it of await r.json()){
+            const recebido = Date.now();
             const resp = await fetch('/api/pdf/' + it.id); if(!resp.ok) continue;
             const f = new File([await resp.blob()], it.nome, {type:'application/pdf'});
             await fetch('/api/ack/' + it.id, {method:'POST', headers:{'X-Roteiriza':'1'}});
-            await RomaneioImport.importarArquivos([f], true);
+            await RomaneioImport.importarArquivos([f], true, {mtime:it.mtime, capturado:it.capturado, recebido});
           }
         }
       }catch(e){ console.warn(e); }
       ocupado = false;
     }
-    setInterval(tick, 2000); tick();
+    setInterval(tick, 1000); tick();
+  }
+  // ---- arquivos: na janela do programa abre o "Salvar como" do Windows (não existe download por link)
+  async function entregarArquivo(nome, blob){
+    if(!window.__roteirizaWebview){
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nome; a.click(); return;
+    }
+    try{
+      const r = await fetch('/api/salvar?nome=' + encodeURIComponent(nome), {method:'POST', headers:{'X-Roteiriza':'1'}, body:blob});
+      const j = await r.json(); const box = document.getElementById('import-status');
+      if(j.ok && box) box.textContent = '✅ Arquivo salvo em ' + j.caminho;
+    }catch(e){ alert('Não consegui salvar o arquivo: ' + (e.message || e)); }
+  }
+  if(window.__roteirizaWebview && typeof downloadCSV === 'function'){
+    downloadCSV = function(filename, headers, rows){
+      const lines = [headers.join(';'), ...rows.map(r => r.map(csvEscape).join(';'))];
+      entregarArquivo(filename, new Blob(['\uFEFF' + lines.join('\r\n')], {type:'text/csv;charset=utf-8;'}));
+    };
   }
   // ---- backup (serve para levar os dados do navegador para o programa, e como cópia de segurança)
   async function exportar(){
     const l = await window.storage.list(''); const dados = {};
     for(const k of ((l && l.keys) || [])){ const v = await window.storage.get(k); if(v) dados[k] = v.value; }
     const blob = new Blob([JSON.stringify({app:'roteiriza', versao:1, geradoEm:new Date().toISOString(), dados})], {type:'application/json'});
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-    a.download = 'backup-roteiriza-' + new Date().toISOString().slice(0,10) + '.json'; a.click();
+    await entregarArquivo('backup-roteiriza-' + new Date().toISOString().slice(0,10) + '.json', blob);
   }
   async function importar(file){
     let j; try{ j = JSON.parse(await file.text()); }catch(e){ alert('Esse arquivo não é um backup do Roteiriza.'); return; }
@@ -3750,6 +3886,69 @@ function romaneioParse(pages){
     document.getElementById('bk-imp').onclick = e => { e.preventDefault(); document.getElementById('bk-file').click(); };
     document.getElementById('bk-file').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if(f) importar(f); };
   }
+})();
+</script>
+<script>
+// ===== Painel da impressora e do programa (só aparece no .exe) =====
+(function(){
+  if(!window.__roteirizaExe) return;
+  const H = {'X-Roteiriza':'1'};
+  const get = async p => (await fetch(p, {cache:'no-store'})).json();
+  const post = async p => (await fetch(p, {method:'POST', headers:H})).json();
+  let ov = null, timer = null;
+  const texto = s => s.instalada === true ? '✅ instalada' : (s.instalada === false ? '❌ não instalada' : '⏳ verificando...');
+
+  async function pintar(){
+    if(!ov) return;
+    const s = await get('/api/impressora');
+    ov.querySelector('#imp-estado').textContent = 'Impressora "Romaneio Freedom": ' + texto(s);
+    ov.querySelector('#imp-msg').textContent = s.msg || '';
+    ov.querySelector('#imp-instalar').disabled = s.ocupado || s.instalada === true;
+    ov.querySelector('#imp-remover').disabled = s.ocupado || s.instalada !== true;
+    if(!s.exe) ov.querySelector('#imp-msg').textContent = 'A impressora só pode ser instalada pelo programa .exe.';
+  }
+  function abrir(){
+    if(ov) return;
+    ov = document.createElement('div'); ov.className = 'rom-overlay';
+    ov.innerHTML = `<div class="rom-modal" style="max-width:520px">
+      <h2>🖨️ Impressora e programa</h2>
+      <div class="rom-box" style="margin-top:10px"><b id="imp-estado">...</b><div class="rom-sub" id="imp-msg" style="margin-top:4px"></div></div>
+      <p class="rom-sub">Depois de instalada (uma vez por computador), imprima o romaneio do sistema na impressora <b>Romaneio Freedom</b>: o Roteiriza abre sozinho na tela de conferência.</p>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px">
+        <button class="btn btn-primary" id="imp-instalar">Instalar impressora</button>
+        <button class="btn btn-ghost" id="imp-remover">Remover impressora</button>
+        <button class="btn btn-ghost" id="imp-pasta">Abrir pasta dos dados</button>
+        <button class="btn btn-ghost" id="imp-sair">Encerrar o programa</button>
+      </div>
+      <div class="rom-actions"><button class="btn btn-ghost" id="imp-fechar">Fechar</button></div></div>`;
+    document.body.appendChild(ov);
+    ov.querySelector('#imp-instalar').onclick = async () => { await post('/api/impressora/instalar'); pintar(); };
+    ov.querySelector('#imp-remover').onclick = async () => { if(confirm('Remover a impressora "Romaneio Freedom"?')){ await post('/api/impressora/remover'); pintar(); } };
+    ov.querySelector('#imp-pasta').onclick = () => post('/api/abrir-pasta');
+    ov.querySelector('#imp-sair').onclick = async () => { if(confirm('Encerrar o Roteiriza? (Imprimir um romaneio abre ele de novo sozinho.)')){ await post('/api/sair'); } };
+    ov.querySelector('#imp-fechar').onclick = () => { clearInterval(timer); ov.remove(); ov = null; };
+    pintar(); timer = setInterval(pintar, 1500);
+  }
+  window.abrirPainelImpressora = abrir;
+  const foot = document.querySelector('footer');
+  if(foot){ foot.insertAdjacentHTML('beforeend', ' · <a href="#" id="imp-cfg" style="color:inherit">🖨️ impressora e programa</a>'); document.getElementById('imp-cfg').onclick = e => { e.preventDefault(); abrir(); }; }
+
+  // aviso no topo enquanto a impressora não estiver instalada
+  (async () => {
+    try{
+      const off = await window.storage.get('impAvisoOff'); if(off) return;
+      let s = null;
+      for(let i = 0; i < 8; i++){ s = await get('/api/impressora'); if(s.instalada !== null) break; await new Promise(r => setTimeout(r, 800)); }
+      if(!s || s.instalada !== false || !s.exe) return;
+      const nav = document.querySelector('.page-nav'); if(!nav) return;
+      const b = document.createElement('div');
+      b.style.cssText = 'background:#FFF4DC; border-bottom:1px solid #EE9B00; padding:10px 16px; font-size:13px; display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:wrap;';
+      b.innerHTML = '🖨️ <span>A impressora <b>Romaneio Freedom</b> ainda não está instalada neste computador.</span><button class="btn btn-primary" style="padding:5px 12px; font-size:12px" id="av-inst">Instalar agora</button><button class="btn btn-ghost" style="padding:5px 12px; font-size:12px" id="av-dep">Não mostrar de novo</button>';
+      nav.insertAdjacentElement('afterend', b);
+      b.querySelector('#av-inst').onclick = async () => { await post('/api/impressora/instalar'); abrir(); b.remove(); };
+      b.querySelector('#av-dep').onclick = async () => { try{ await window.storage.set('impAvisoOff', '1'); }catch(e){} b.remove(); };
+    }catch(e){ console.warn(e); }
+  })();
 })();
 </script>
 </body>
