@@ -1,0 +1,27 @@
+ROTEIRIZA FREEDOM  (programa do Windows)
+=======================================
+
+1) INSTALAR
+   Descompacte a pasta Roteiriza em um lugar fixo (ex.: C:\Roteiriza) e abra Roteiriza.exe.
+   O programa abre o Roteiriza no navegador (http://127.0.0.1:47654). Fica uma janelinha do
+   programa na barra de tarefas: não feche enquanto estiver usando.
+   Os dados ficam na pasta "dados", ao lado do Roteiriza.exe. Faça cópia dessa pasta de vez em quando.
+
+2) IMPRESSORA "ROMANEIO FREEDOM"  (uma vez só, em cada computador)
+   Na janelinha do programa: "Instalar impressora Romaneio Freedom" > aceite a permissão de administrador.
+   Uso: no sistema, imprima o romaneio (Controle de Entrega) na impressora "Romaneio Freedom".
+   O Roteiriza abre sozinho na tela de conferência, com os pedidos, endereços e o motorista. Confira e importe.
+   Se o programa estiver fechado, imprimir o romaneio abre ele sozinho.
+   Mudou o .exe de pasta? Instale a impressora de novo (ela aponta para o caminho do .exe).
+
+3) LEVAR OS DADOS QUE JÁ ESTAVAM NO NAVEGADOR (só na primeira vez)
+   Abra o arquivo antigo (RoteirizaFreedomTech_offline.html) no mesmo navegador de sempre:
+   rodapé > "exportar backup". No programa novo: rodapé > "importar backup" e escolha o arquivo.
+
+4) ATUALIZAR
+   Substitua os arquivos do .exe (Roteiriza.exe e a pasta _internal) sem mexer na pasta "dados".
+
+5) SE A IMPRESSORA NÃO ABRIR O ROMANEIO
+   - Veja se a janelinha mostra "Impressora Romaneio Freedom: instalada".
+   - Arquivo dados\instalacao_impressora.log mostra o que o instalador fez.
+   - O PDF impresso fica salvo em dados\romaneios (dá para importar à mão pelo botão "Importar romaneio (PDF)").
