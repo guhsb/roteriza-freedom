@@ -45,3 +45,11 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    Mande esse arquivo para ver exatamente onde o tempo vai.
    DICA: deixe a janela do Roteiriza aberta (minimizada) durante o dia. Com ela aberta, a impressão chega em
    cerca de 2 segundos; com o programa fechado, ele precisa abrir antes (alguns segundos a mais).
+
+8) SE DER ERRO AO ABRIR ("Failed to resolve ... Python.Runtime.dll")
+   O Windows marca como "bloqueado" tudo que vem de um zip baixado da internet, e o componente da janela não
+   carrega DLL bloqueada. O programa já desbloqueia sozinho na primeira abertura. Se mesmo assim der erro, ele abre a janela
+   do Edge no modo aplicativo (funciona igual) e grava o motivo em dados\erro_janela.log (me mande esse arquivo).
+   Para evitar de vez, ANTES de descompactar: clique com o botão direito no Roteiriza.zip > Propriedades >
+   marque "Desbloquear" > OK, e só depois extraia. Ou, na pasta já extraída, no PowerShell:
+       Get-ChildItem -Recurse | Unblock-File

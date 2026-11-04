@@ -37,6 +37,39 @@ def webview2_instalado():
     return False
 
 
+def desbloquear_arquivos():
+    """Arquivo baixado da internet vem "bloqueado" pelo Windows (marca Zone.Identifier) e o .NET se recusa
+    a carregar DLL bloqueada ("Failed to resolve Python.Runtime..."). Tira a marca das DLLs do programa
+    antes de abrir a janela — o mesmo que "Desbloquear" nas propriedades do arquivo. Só roda 1 vez por versão."""
+    if sys.platform != "win32":
+        return
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(sys.executable))
+    try:
+        versao = str(int(os.path.getmtime(sys.executable)))
+        marcador = os.path.join(servidor.pasta_dados(), ".desbloqueado_" + versao)
+        if os.path.exists(marcador):
+            return
+        for raiz, _, arquivos in os.walk(os.path.dirname(os.path.abspath(sys.executable))):
+            for nome in arquivos:
+                if nome.lower().endswith((".dll", ".pyd", ".exe")):
+                    try:
+                        os.remove(os.path.join(raiz, nome) + ":Zone.Identifier")
+                    except OSError:
+                        pass                      # não estava bloqueado
+        open(marcador, "w").close()
+    except Exception:                             # noqa: BLE001  (nunca impede o programa de abrir)
+        pass
+
+
+def registrar_erro(erro):
+    import traceback
+    try:
+        with open(os.path.join(servidor.pasta_dados(), "erro_janela.log"), "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + "".join(traceback.format_exception(erro)) + "\n")
+    except Exception:                             # noqa: BLE001
+        pass
+
+
 def usar_webview():
     if os.environ.get("ROTEIRIZA_SEM_WEBVIEW"):
         return False
@@ -87,6 +120,7 @@ def rodar_webview(srv):
 
 def rodar_navegador(srv):
     """Plano B (sem o motor do Windows): janela do Edge/Chrome em modo aplicativo."""
+    srv.ao_chegar = srv.salvar_como = srv.sair_cb = None      # solta o que a janela embutida tinha configurado
     def abrir():
         srv.janela = janela.abrir(servidor.URL)
     srv.abrir_janela = abrir
@@ -128,7 +162,12 @@ def main():
     srv.atualizar_impressora()
     try:
         if usar_webview():
-            rodar_webview(srv)
+            desbloquear_arquivos()
+            try:
+                rodar_webview(srv)
+            except Exception as erro:                 # noqa: BLE001
+                registrar_erro(erro)                  # dados\erro_janela.log
+                rodar_navegador(srv)                  # a janela embutida não abriu: usa o plano B, sem cair
         else:
             rodar_navegador(srv)
     finally:
