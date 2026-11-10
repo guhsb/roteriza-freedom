@@ -260,6 +260,10 @@ def remover():
     return executa_como_admin(script_remover())
 
 
+def reparar():
+    return executa_como_admin(script_reparar())
+
+
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
