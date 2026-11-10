@@ -34,7 +34,7 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    - "Reparar impressão": limpa a fila travada do Windows (cancela os documentos presos) e apaga o PDF que sobrou.
      Cancela documentos de QUALQUER impressora que estejam esperando.
    - O PDF impresso fica em C:\ProgramData\RoteirizaFreedom\entrada (caminho fixo e curto, sem espaços) e é MOVIDO
-     para dados\romaneios assim que o programa o lê (assim a impressora fica livre para o próximo).
+     para dados\lidos assim que o programa o lê (assim a impressora fica livre para o próximo).
    - Mudou o Roteiriza.exe de pasta? Clique em "Instalar impressora" de novo.
    - Dá para importar à mão pelo botão "Importar romaneio (PDF)".
 
@@ -81,3 +81,47 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    - Vários pedidos no mesmo local são cobrados UMA vez só. "Mesmo local" = mesma rua + número + cidade, mesmo que o
      texto esteja diferente (AV x Avenida, EST x Estrada, com/sem bairro, maiúsculas, acentos). Sem número no endereço,
      só vale se o texto for igual. Na conferência aparece "mesmo local da NF ... · uma cobrança só".
+
+12) SISTEMA EM ÁREA DE TRABALHO REMOTA
+   A impressão do sistema volta para este computador por uma impressora "redirecionada": o nome termina com
+   "(redirecionada NNNN)" (o número é o da sessão e muda a cada conexão). Imprima SEMPRE nessa. Outra cópia da
+   "Romaneio Freedom" com nome diferente fica presa no servidor e a tarefa trava em "Spooling" na sua fila.
+   - Ao conectar: Mostrar Opções > Recursos Locais > Impressoras > Mais > marque só a "Romaneio Freedom".
+   - Ao terminar: use "Sair" (logoff) em vez de só fechar a janela, para não sobrar impressora de sessão antiga.
+   - Se a impressora redirecionada não aparecer na lista do sistema, desconecte e conecte de novo com Impressoras ligado.
+
+   SEM IMPRESSORA (plano B, vale para qualquer caso): o programa lê QUALQUER PDF que aparecer na pasta de entrada
+   (C:\ProgramData\RoteirizaFreedom\entrada; botão "Abrir pasta de entrada" no painel), com qualquer nome.
+   Se o relatório do sistema tiver "Salvar/Exportar PDF", salve nessa pasta. Na Área de Trabalho Remota, o caminho
+   visto de dentro do servidor é \\tsclient\C\ProgramData\RoteirizaFreedom\entrada (precisa de "Unidades"
+   ligado em Recursos Locais > Mais). Pode salvar vários de uma vez; o PDF só é lido depois de terminar de copiar.
+
+13) A ETIQUETA FREEDOM FUNCIONA E A ROMANEIO FREEDOM NÃO (mesmo PC)
+   Rodapé > "impressora e programa" > "Comparar com a Etiqueta Freedom": mostra se as duas impressoras estão
+   configuradas igual (driver, processador, tipo de dados...) e grava dados\comparacao_impressoras.txt.
+   Dois testes simples, no sistema (cada um leva 1 minuto):
+   a) Imprimir OUTRO relatório qualquer (curto, sem ser o Controle de Entrega) na "Romaneio Freedom".
+   b) Imprimir o Controle de Entrega na "Etiqueta Freedom".
+   Resultado: (a) funciona e o Controle não = o problema é o documento (grande/paisagem), não a impressora.
+              (b) funciona = a impressora Romaneio é que está diferente: mande a comparação.
+
+14) TRÊS JEITOS DE O PROGRAMA LER O ROMANEIO (igual ao programa de Etiquetas)
+   1) Pasta "Romaneios", ao lado do Roteiriza.exe (o mais simples, sem impressora): salve o PDF do relatório ali
+      (botão "Abrir pasta" no painel "impressora e programa"). É lido na hora, vai para dados\lidos e some da pasta.
+   2) Pasta do ERP (opcional): no painel, cole o caminho da pasta onde o sistema salva os PDFs. Todo PDF NOVO que cair
+      lá é lido sozinho; os antigos são ignorados e nada é apagado nem movido (o programa lembra o que já leu).
+   3) Impressora "Romaneio Freedom": o sistema imprime nela (itens 2, 5, 12 e 13 acima).
+   Os três funcionam ao mesmo tempo. O PDF só é lido depois de terminar de ser gravado/copiado.
+   ABRIR JUNTO COM O WINDOWS: no painel, marque "Abrir junto com o Windows (minimizado)". O programa já fica pronto
+   quando o romaneio chega e a janela vem para a frente sozinha (sem esperar o programa abrir).
+
+15) PDF EM IMAGEM (LEITURA POR IMAGEM, igual à leitura do DANFE no programa de Etiquetas)
+   Quando o sistema imprime o relatório como FIGURA (o PDF não tem texto), o programa lê o romaneio por leitura de imagem
+   (OCR). Leva de 10 a 30 segundos (depende do computador; aparece "Lendo o romaneio por leitura de imagem...").
+   - Número do romaneio, motorista, data de saída, total, NFs, valores, pedido e código do cliente saem com alta
+     precisão nos testes. Nome do cliente e ENDEREÇO podem ter uma letra errada ou um espaço a mais.
+   - Por isso, neste caso a tela de conferência vem com os campos EDITÁVEIS (cliente, rua e número, bairro, cidade,
+     valor). Linha em VERMELHO = endereço que não foi lido: preencha antes de importar.
+   - O programa confere a soma das NFs com o total do romaneio e avisa se não bater (sinal de nota lida errada).
+   - PDF com texto continua sendo lido na hora, sem leitura de imagem.
+   - Esta função deixa o programa maior (mais ~250 MB) por causa do leitor de imagem. Só existe no .exe.

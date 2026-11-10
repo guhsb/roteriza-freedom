@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependências
-        run: pip install pyinstaller pywebview==5.3.2
+        run: pip install pyinstaller pywebview==5.3.2 rapidocr_onnxruntime==1.4.4 pypdfium2
 
       - name: Gerar o programa (pasta com .exe)
         run: >
@@ -31,6 +31,11 @@ jobs:
           --collect-all webview
           --collect-all pythonnet
           --collect-all clr_loader
+          --collect-all rapidocr_onnxruntime
+          --collect-all onnxruntime
+          --collect-all pypdfium2
+          --collect-all shapely
+          --collect-all pyclipper
           app.py
 
       - name: Compactar

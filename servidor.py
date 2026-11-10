@@ -68,7 +68,43 @@ def pasta_entrada():
 
 
 def pasta_romaneios():
-    return _sub("romaneios")
+    """Onde ficam guardados os PDFs já lidos (dados\\lidos)."""
+    return _sub("lidos")
+
+
+@functools.lru_cache(maxsize=1)
+def pasta_visivel():
+    """Pasta "Romaneios" AO LADO do programa (como a pasta DANFE do programa de etiquetas): qualquer PDF salvo ali
+    é lido na hora e some da pasta. É o jeito mais simples: não depende de impressora."""
+    p = os.path.join(pasta_exe(), "Romaneios")
+    try:
+        os.makedirs(p, exist_ok=True)
+        t = os.path.join(p, ".teste")
+        open(t, "w").close()
+        os.remove(t)
+        return p
+    except OSError:
+        return _sub("Romaneios")
+
+
+def _arq_config():
+    return os.path.join(pasta_dados(), "config.json")
+
+
+def ler_config():
+    try:
+        with open(_arq_config(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:                                # noqa: BLE001
+        return {}
+
+
+def gravar_config(cfg):
+    try:
+        with open(_arq_config(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
 
 
 def pasta_storage():
@@ -113,7 +149,13 @@ class Servidor:
         self.trazer = None            # traz a janela do programa para a frente
         self.salvar_como = None       # salvar_como(nome, bytes) -> caminho  (janela "Salvar como" do Windows)
         self.imp = {"instalada": None, "ocupado": False, "msg": ""}
-        self._visto = None
+        self._visto = {}               # arquivo -> (mtime, tamanho) da última leitura (espera parar de mudar)
+        self.pastas_erp = [p for p in ler_config().get("pastas_erp", []) if isinstance(p, dict) and p.get("caminho")]
+        try:
+            with open(os.path.join(pasta_dados(), "vistos_erp.json"), encoding="utf-8") as f:
+                self._vistos_erp = set(json.load(f))      # PDFs da pasta do ERP que já foram lidos
+        except Exception:                                  # noqa: BLE001
+            self._vistos_erp = set()
         self.httpd = None
         self._parar = threading.Event()
 
@@ -155,6 +197,23 @@ class Servidor:
                     self.imp["msg"] = 'Fila de impressão limpa. Clique em "Testar impressora" para conferir.'
                 else:
                     self.imp["msg"] = "Impressora removida."
+        threading.Thread(target=alvo, daemon=True).start()
+
+    def comparar_impressoras(self):
+        """Compara a Romaneio Freedom com a Etiqueta Freedom (que funciona) e mostra o que é diferente."""
+        with self.lock:
+            if self.imp["ocupado"]:
+                return
+            self.imp["ocupado"] = True
+            self.imp["msg"] = "Comparando com a Etiqueta Freedom..."
+
+        def alvo():
+            import impressora_virtual
+            texto = impressora_virtual.comparar_com_etiqueta()
+            msg = impressora_virtual.resumo_comparacao(texto) + " (detalhes em dados\\comparacao_impressoras.txt)"
+            with self.lock:
+                self.imp["ocupado"] = False
+                self.imp["msg"] = msg
         threading.Thread(target=alvo, daemon=True).start()
 
     def testar_impressora(self):
@@ -201,19 +260,86 @@ class Servidor:
         except OSError:
             return None
 
+    @staticmethod
+    def _pdfs_na_entrada():
+        """PDFs esperando nas duas "caixas de entrada": a da impressora (romaneio.pdf, em ProgramData) e a pasta
+        "Romaneios" ao lado do programa (PDF salvo à mão, sem impressora)."""
+        achados = []
+        for pasta in (pasta_entrada(), pasta_visivel()):
+            try:
+                achados += [os.path.join(pasta, n) for n in sorted(os.listdir(pasta)) if n.lower().endswith(".pdf")]
+            except OSError:
+                pass
+        return achados
+
+    # ---------- pastas do ERP (onde o sistema salva os PDFs): lê os NOVOS, não apaga nada ----------
+    def adicionar_pasta_erp(self, caminho):
+        caminho = os.path.normpath((caminho or "").strip().strip('"'))
+        if not caminho or not os.path.isdir(caminho):
+            return False, "Pasta não encontrada. Confira o caminho."
+        if any(os.path.normcase(p["caminho"]) == os.path.normcase(caminho) for p in self.pastas_erp):
+            return True, ""
+        # PDFs que já estavam lá antes são ignorados: só os NOVOS (a partir de agora) viram romaneio
+        self.pastas_erp.append({"caminho": caminho, "desde": time.time()})
+        self._salvar_pastas()
+        return True, ""
+
+    def remover_pasta_erp(self, caminho):
+        self.pastas_erp = [p for p in self.pastas_erp if os.path.normcase(p["caminho"]) != os.path.normcase(os.path.normpath(caminho or ""))]
+        self._salvar_pastas()
+
+    def _salvar_pastas(self):
+        cfg = ler_config()
+        cfg["pastas_erp"] = self.pastas_erp
+        gravar_config(cfg)
+
+    def _marca_visto_erp(self, chave):
+        self._vistos_erp.add(chave)
+        try:
+            with open(os.path.join(pasta_dados(), "vistos_erp.json"), "w", encoding="utf-8") as f:
+                json.dump(sorted(self._vistos_erp)[-3000:], f)
+        except OSError:
+            pass
+
+    def _varrer_pasta_erp(self, p):
+        caminho, desde = p["caminho"], p.get("desde", 0)
+        try:
+            nomes = os.listdir(caminho)
+        except OSError:
+            return
+        for n in nomes:
+            if not n.lower().endswith(".pdf"):
+                continue
+            arq = os.path.join(caminho, n)
+            try:
+                st = os.stat(arq)
+            except OSError:
+                continue
+            if st.st_mtime < desde - 2:
+                continue                                    # é de antes de configurar a pasta: ignora
+            chave = f"{os.path.normcase(arq)}|{st.st_mtime_ns}|{st.st_size}"
+            if chave in self._vistos_erp:
+                continue
+            self._capturar_um(arq, mover=False, vistos_chave=chave)
+
     def ha_novo(self):
-        """Tem um PDF na porta da impressora esperando? (usado quando a impressão abre o programa: --romaneio)"""
-        return self._chave(porta_arquivo()) is not None
+        """Tem algum PDF esperando na pasta de entrada? (usado quando a impressão abre o programa: --romaneio)"""
+        return any(self._chave(a) is not None for a in self._pdfs_na_entrada())
 
     # ---------- captura do romaneio impresso ----------
     def capturar(self):
-        arq = porta_arquivo()
+        for arq in self._pdfs_na_entrada():
+            self._capturar_um(arq)
+        for p in list(self.pastas_erp):
+            self._varrer_pasta_erp(p)
+
+    def _capturar_um(self, arq, mover=True, vistos_chave=None):
         c = self._chave(arq)
         if c is None:
-            self._visto = None
+            self._visto.pop(arq, None)
             return
-        if self._visto != c:                # espera o arquivo parar de mudar (2 leituras iguais)
-            self._visto = c
+        if self._visto.get(arq) != c:       # espera o arquivo parar de mudar (2 leituras iguais)
+            self._visto[arq] = c
             return
         nome = time.strftime("romaneio_%Y%m%d_%H%M%S.pdf")
         destino = os.path.join(pasta_romaneios(), nome)
@@ -222,12 +348,17 @@ class Servidor:
             k += 1
             destino = os.path.join(pasta_romaneios(), nome[:-4] + f"_{k}.pdf")
         try:
-            # MOVE (não copia): a pasta da impressora precisa ficar livre, senão o Windows não consegue
-            # gravar o próximo romaneio e a impressão fica presa em "Spooling"
-            shutil.move(arq, destino)
+            if mover:
+                # MOVE (não copia): a pasta da impressora precisa ficar livre, senão o Windows não consegue
+                # gravar o próximo romaneio e a impressão fica presa em "Spooling"
+                shutil.move(arq, destino)
+            else:
+                shutil.copy2(arq, destino)  # pasta do ERP: o original fica lá (o sistema é dono dele)
         except OSError:
-            return                          # ainda em uso pelo Windows; tenta na próxima
-        self._visto = None
+            return                          # ainda em uso (Windows ou cópia em andamento); tenta na próxima
+        self._visto.pop(arq, None)
+        if vistos_chave:
+            self._marca_visto_erp(vistos_chave)
         item = {"id": uuid.uuid4().hex[:12], "nome": os.path.basename(destino), "caminho": destino,
                 "mtime": int(c[0] / 1e6), "capturado": int(time.time() * 1000)}   # ms: quando o PDF foi gravado / capturado
         with self.lock:
@@ -314,6 +445,14 @@ class Servidor:
                     pref = (parse_qs(u.query).get("prefix") or [""])[0]
                     chaves = [unquote(n[:-5]) for n in os.listdir(pasta_storage()) if n.endswith(".json")]
                     return self._resp(200, {"keys": [k for k in chaves if k.startswith(pref)]})
+                if u.path == "/api/config":
+                    import impressora_virtual
+                    cfg = ler_config()
+                    return self._resp(200, {"pasta_romaneios": pasta_visivel(), "pasta_impressora": pasta_entrada(),
+                                            "pastas_erp": [p["caminho"] for p in srv.pastas_erp],
+                                            "inicio_automatico": impressora_virtual.inicio_automatico_ativo(),
+                                            "ocr": __import__("ocr_romaneio").disponivel(),
+                                            "exe": impressora_virtual.eh_exe()})
                 if u.path == "/api/impressora":
                     import impressora_virtual
                     with srv.lock:
@@ -368,12 +507,30 @@ class Servidor:
                 if u.path in ("/api/impressora/instalar", "/api/impressora/remover", "/api/impressora/reparar"):
                     srv.acao_impressora(u.path.rsplit("/", 1)[-1])
                     return self._resp(200, {"ok": True})
+                if u.path in ("/api/pasta-erp", "/api/pasta-erp/remover"):
+                    n = min(int(self.headers.get("Content-Length") or 0), 2000)
+                    caminho = self.rfile.read(n).decode("utf-8", "replace")
+                    if u.path.endswith("/remover"):
+                        srv.remover_pasta_erp(caminho)
+                        return self._resp(200, {"ok": True})
+                    ok, erro = srv.adicionar_pasta_erp(caminho)
+                    return self._resp(200, {"ok": ok, "erro": erro})
+                if u.path == "/api/inicio-automatico":
+                    import impressora_virtual
+                    ligar = (parse_qs(u.query).get("ligar") or ["0"])[0] == "1"
+                    erro = impressora_virtual.define_inicio_automatico(ligar)
+                    return self._resp(200, {"ok": not erro, "erro": erro,
+                                            "inicio_automatico": impressora_virtual.inicio_automatico_ativo()})
+                if u.path == "/api/impressora/comparar":
+                    srv.comparar_impressoras()
+                    return self._resp(200, {"ok": True})
                 if u.path == "/api/impressora/testar":
                     srv.testar_impressora()
                     return self._resp(200, {"ok": True})
                 if u.path == "/api/abrir-pasta":
+                    qual = (parse_qs(u.query).get("qual") or [""])[0]
                     if hasattr(os, "startfile"):
-                        os.startfile(pasta_dados())            # noqa: S606
+                        os.startfile({"entrada": pasta_entrada, "romaneios": pasta_visivel}.get(qual, pasta_dados)())   # noqa: S606
                     return self._resp(200, {"ok": True})
                 if u.path == "/api/log":
                     n = min(int(self.headers.get("Content-Length") or 0), 4000)
@@ -387,6 +544,29 @@ class Servidor:
                     except OSError:
                         pass
                     return self._resp(200, {"ok": True})
+                if u.path == "/api/ocr":
+                    # PDF em IMAGEM (o sistema às vezes imprime o relatório como figura): lê por OCR e devolve os trechos com posição
+                    import tempfile
+                    import ocr_romaneio
+                    n = int(self.headers.get("Content-Length") or 0)
+                    if n <= 0 or n > 60_000_000:
+                        return self._resp(200, {"ok": False, "erro": "Arquivo vazio ou grande demais."})
+                    dados = self.rfile.read(n)
+                    if not ocr_romaneio.disponivel():
+                        return self._resp(200, {"ok": False, "erro": "A leitura de imagem não está instalada neste programa."})
+                    fd, tmp = tempfile.mkstemp(suffix=".pdf", dir=pasta_dados())
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(dados)
+                        r = ocr_romaneio.ocr_pdf(tmp)
+                        return self._resp(200, {"ok": True, **r})
+                    except Exception as e:                    # noqa: BLE001
+                        return self._resp(200, {"ok": False, "erro": f"Não consegui ler a imagem: {e}"})
+                    finally:
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
                 if u.path == "/api/sair":
                     srv.pedido_sair = True
                     if srv.sair_cb:
@@ -422,6 +602,12 @@ class Servidor:
         self.httpd.daemon_threads = True
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         threading.Thread(target=self._vigia, daemon=True).start()
+        try:
+            import ocr_romaneio
+            if ocr_romaneio.disponivel():
+                threading.Thread(target=ocr_romaneio.aquecer, daemon=True).start()
+        except Exception:                                      # noqa: BLE001
+            pass
 
     def parar(self):
         self._parar.set()

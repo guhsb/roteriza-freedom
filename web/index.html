@@ -179,6 +179,7 @@
   .rom-box input[type=checkbox], .rom-tab input[type=checkbox]{ width:auto; margin:0; }
   .rom-box select{ width:auto; display:inline-block; padding:3px 8px; margin:0 0 0 4px; }
   .rom-dup{ opacity:.55; }
+  .rom-ed{ width:100%; padding:3px 6px; font-size:12px; border:1px solid var(--line); border-radius:6px; background:#fff; box-sizing:border-box; }
   .rom-actions{ display:flex; justify-content:flex-end; gap:8px; margin-top:10px; }
   #rom-watch-status{ font-size:12px; color:var(--muted); margin-top:4px; }
 </style>
@@ -3595,6 +3596,183 @@ function romaneioParse(pages){
 }
 
 
+// ===== Leitor do romaneio a partir da leitura por IMAGEM (OCR) =====
+  // Recebe as páginas do servidor: [{w,h,itens:[{s,x,y}]}], com palavras soltas, posição em pontos do PDF e y crescendo para cima.
+  // Devolve o mesmo formato do leitor de PDF com texto.
+  function romaneioParseOCR(paginas, cidades){
+    const norm = s => (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+    const money = /^\d{1,3}([.,]\d{3})*[.,]\d{2}$/;
+    const num = v => {   // decimal = o último separador, se vier seguido de 2 dígitos (a leitura às vezes troca a vírgula por ponto)
+      const t = String(v).replace(/[^\d.,]/g, ''); const m = t.match(/^(.*?)[.,](\d{2})$/);
+      const n = m ? parseFloat(m[1].replace(/[.,]/g, '') + '.' + m[2]) : parseFloat(t.replace(/[.,]/g, ''));
+      return isNaN(n) ? null : n;
+    };
+    const toISO = br => { const m = (br||'').replace(/[Oo]/g,'0').match(/(\d{2})\/(\d{2})\/(\d{4})/); return m ? `${m[3]}-${m[2]}-${m[1]}` : ''; };
+    const limpaTraco = s => (s||'').replace(/[–—]/g, '-');
+  
+    // palavras -> linhas (de cima para baixo)
+    const linhasDe = itens => {
+      const ord = itens.slice().sort((a,b) => b.y - a.y || a.x - b.x), linhas = [];
+      ord.forEach(t => {
+        const u = linhas[linhas.length-1];
+        if(u && Math.abs(u.y - t.y) <= 3.5){ u.toks.push(t); u.y = (u.y * (u.toks.length-1) + t.y) / u.toks.length; }
+        else linhas.push({y: t.y, toks: [t]});
+      });
+      linhas.forEach(l => { l.toks.sort((a,b) => a.x - b.x); l.texto = l.toks.map(t => t.s).join(' '); });
+      return linhas;
+    };
+    const pgs = (paginas || []).map(p => ({w: p.w || 842, h: p.h || 595, linhas: linhasDe(p.itens || [])}));
+    const p1 = pgs[0];
+    if(!p1) return {ok:false, erro:'Não consegui ler o PDF.'};
+    if(!p1.linhas.some(l => /controle\s*de\s*entrega/.test(norm(l.texto)))) return {ok:false, erro:'Este PDF não parece ser um romaneio (a leitura por imagem não achou "Controle de Entrega").'};
+  
+    // ---- cabeçalho
+    const meio = p1.w * 0.52;
+    const esq = p1.linhas.map(l => l.toks.filter(t => t.x < meio).map(t => t.s).join(' '));
+    const dir = p1.linhas.map(l => l.toks.filter(t => t.x >= meio).map(t => t.s).join(' '));
+    const acha = (textos, re) => { for(const t of textos){ const m = norm(t).match(re); if(m) return m; } return null; };
+    const mRom = acha(esq, /romaneio:?\s*(\d+)/);
+    const mMot = acha(dir, /motorista:?\s*(.+)$/);
+    const mData = acha(dir.map(t => t.replace(/\s+/g, '')), /datas\S{0,3}da:?([\d\/oO]{8,10})/);   // sem espaços: a leitura às vezes corta "Sa ida"
+    const textoOrig = (textos, re) => { for(const t of textos){ if(re.test(norm(t))){ const m = t.match(/:\s*(.+)$/); if(m) return m[1].trim(); } } return ''; };
+    const cab = {
+      romaneio: mRom ? mRom[1] : '',
+      motorista: textoOrig(dir, /motorista:/),
+      dataSaida: mData ? toISO(mData[1]) : '',
+      transportadora: textoOrig(esq, /transportadora:/),
+      geradoEm: ((p1.linhas.map(l => l.texto).join('\n')).match(/\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}(:\d{2})?/) || [''])[0]
+    };
+    let totalDeclarado = null;
+    for(const l of p1.linhas){
+      if(/^total:?$/.test(norm(l.toks[0].s))){ const m = l.toks.map(t => t.s).filter(s => money.test(s)); if(m.length){ totalDeclarado = num(m[m.length-1]); break; } }
+    }
+  
+    // ---- tabela: pedido, cód. cliente, fantasia (a NF também sai nos recibos)
+    const tabela = {};
+    const hl = p1.linhas.find(l => /pedido/.test(norm(l.texto)) && /fantasia/.test(norm(l.texto)));
+    if(hl){
+      const xDe = re => { const t = hl.toks.find(t => re.test(norm(t.s))); return t ? t.x : null; };
+      const pedCol = hl.toks[0].x;   // "Nº Pedido" é sempre a 1ª coluna
+      const codX = xDe(/^c[o0]d/), fanX = xDe(/fantasia/);
+      const iDoc = hl.toks.findIndex(t => /doc\.?$/.test(norm(t.s)));   // "Doc." ou "N°Doc." (a leitura às vezes cola)
+      const docX = iDoc < 0 ? null : (norm(hl.toks[iDoc].s).length > 5 ? hl.toks[iDoc].x : (iDoc > 0 && hl.toks[iDoc].x - hl.toks[iDoc-1].x < 26 ? hl.toks[iDoc-1].x : hl.toks[iDoc].x - 14));
+      let atual = null;
+      for(const l of p1.linhas){
+        if(l.y >= hl.y - 3) continue;
+        if(/^portador$/.test(norm(l.toks[0].s)) || /^total:?$/.test(norm(l.toks[0].s))) break;
+        const ped = l.toks.find(t => Math.abs(t.x - pedCol) < 16 && /^\d{5,7}$/.test(t.s));
+        if(ped){
+          const doc = docX == null ? null : l.toks.find(t => /^\d{5}$/.test(t.s) && t.x >= docX - 16 && t.x <= docX + 45);
+          const cod = codX == null ? null : l.toks.find(t => Math.abs(t.x - codX) < 14 && /^\d{1,6}$/.test(t.s) && t !== ped);
+          const fan = fanX == null ? [] : l.toks.filter(t => t.x >= fanX - 6 && (docX == null || t.x < docX - 6) && t !== doc && !money.test(t.s));
+          atual = {pedido: ped.s, codCliente: cod ? cod.s : '', fan: fan.map(t => t.s), doc: doc ? doc.s : ''};
+          tabela[doc ? doc.s : 'sem-doc-' + ped.s] = atual;
+        } else if(atual && fanX != null){
+          const so = l.toks.filter(t => t.x >= fanX - 6 && (docX == null || t.x < docX - 6) && !money.test(t.s));
+          if(so.length && so.length === l.toks.length) so.forEach(t => atual.fan.push(t.s));   // linha só com a continuação do nome fantasia
+        }
+      }
+    }
+  
+    // ---- recibos (destinatário, emissão, nº da NF, valor)
+    // A âncora de cada recibo é o "N° 70416" da caixa da direita (a leitura às vezes perde a linha "Recebemos" ou a do destinatário).
+    const cidadesConhecidas = (cidades || []).map(c => ({nome: c, k: norm(c).replace(/[^a-z0-9]/g, '')})).filter(c => c.k).sort((a, b) => b.k.length - a.k.length);
+    const compacto = t => norm(t).replace(/[^a-z0-9]/g, '');
+    // a leitura às vezes separa números ("173 10", "BR- 1 16") e cola o tipo da via na preposição ("ESTDA GRACIOSA")
+    const arrumaNumeros = t => t.replace(/(\d)\s+(?=\d)/g, '$1').replace(/\b(BR|PR|SC|SP)\s*-\s*(?=\d)/gi, '$1-');
+    const arrumaVia = r => (r || '').replace(/^(EST|ROD|AV|RUA|TRAV)(?=(DA|DE|DO|DAS|DOS)\b)/i, '$1 ');
+    const separaEndereco = bruto0 => { const e = separaEndereco0(arrumaNumeros(bruto0)); e.rua = arrumaVia(e.rua); return e; };
+    const separaEndereco0 = bruto => {
+      let t = limpaTraco(bruto).replace(/\s+/g, ' ').replace(/\.\s*$/, '').trim();
+      const partes = t.split(/\s+-\s+/).map(x => x.trim()).filter(Boolean);
+      const sufixoUF = /[\s-]*(PR|SC|SP|RS|MG|RJ)\s*$/i;
+      if(partes.length >= 5){   // formato completo, com os hífens: razão - rua, nº - bairro - cidade - UF
+        return {uf: partes[partes.length-1].toUpperCase(), cidade: partes[partes.length-2], bairro: partes[partes.length-3], rua: partes[partes.length-4], razao: partes.slice(0, partes.length-4).join(' - ')};
+      }
+      // palavras coladas / hífens perdidos pela leitura: acha UF, cidade (lista conhecida), início da rua e número
+      let uf = 'PR'; const mu = t.match(sufixoUF); if(mu){ uf = mu[1].toUpperCase(); t = t.slice(0, mu.index); }
+      t = t.replace(/[\s-]+$/, '');
+      const cortaFim = n => { let i = t.length, falta = n; while(i > 0 && falta > 0){ i--; if(/[A-Za-z0-9\u00C0-\u00FF]/.test(t[i])) falta--; } return i; };
+      let cidade = '';
+      const hit = cidadesConhecidas.find(x => compacto(t).endsWith(x.k));
+      if(hit){ cidade = hit.nome; t = t.slice(0, cortaFim(hit.k.length)).replace(/[\s-]+$/, ''); }
+      else { const w = t.match(/([A-Za-z\u00C0-\u00FF]+)\s*$/); if(w){ cidade = w[1]; t = t.slice(0, w.index).replace(/[\s-]+$/, ''); } }
+      // começo do endereço: tipo de via logo depois de um hífen (mesmo colado: "LTDA-RODRODOVIA"); senão depois de um espaço
+      const tipos = 'RUA|AV|AVENIDA|EST|ESTRADA|ROD|RODOVIA|TRAV|TRAVESSA|ALAMEDA|AL|PCA|PRACA|LGO|LARGO';
+      let mr = t.match(new RegExp('-\\s*((?:' + tipos + ').*)$', 'i')) || t.match(new RegExp('\\s((?:' + tipos + ')\\b.*)$', 'i'));
+      let razao = t, endereco = '';
+      if(mr){ razao = t.slice(0, mr.index).replace(/[\s-]+$/, ''); endereco = mr[1]; }
+      let rua = endereco, bairro = '';
+      const mn = endereco.match(/^(.*?[A-Za-z0-9\u00C0-\u00FF])\s*[,.]\s*(\d[\d\s]*\d|\d)\s*[-\s]*(.*)$/);   // a leitura às vezes troca a vírgula por ponto
+      if(mn){ rua = mn[1].trim() + ', ' + mn[2].replace(/\s+/g, ''); bairro = mn[3].replace(/^[\s-]+/, '').trim(); }
+      return {razao: razao || partes[0] || '', rua, bairro, cidade, uf};
+    };
+  
+    const stubs = [];
+    pgs.forEach(pg => {
+      const limite = pg.w * 0.57;
+      const nfs = [];
+      pg.linhas.forEach(l => {
+        const dirT = l.toks.filter(t => t.x >= limite).map(t => t.s).join(' ');
+        const m = dirT.match(/\bN\S{0,2}\s*[:\-]?\s*(\d{5})\b/);
+        if(m) nfs.push({numDoc: m[1], y: l.y});
+      });
+      nfs.forEach(nf => {
+        const dir = pg.linhas.filter(l => l.y <= nf.y + 3 && l.y > nf.y - 40).map(l => l.toks.filter(t => t.x >= limite).map(t => t.s).join(' ')).join(' ');
+        const vt = dir.match(/R[S$5]\s*([\d.,]+)/);
+        const esqL = pg.linhas.filter(l => l.y <= nf.y + 26 && l.y > nf.y - 4);
+        const esqT = limpaTraco(esqL.map(l => l.toks.filter(t => t.x < limite).map(t => t.s).join(' ')).join(' '));
+        const md = esqT.match(/Destin\S{0,6}:?\s*(.*)$/i);
+        let d = null;
+        if(md){
+          const corte = md[1].search(/Emiss\S{0,3}\s*:/i);
+          const endTxt = corte >= 0 ? md[1].slice(0, corte) : md[1];
+          const resto = corte >= 0 ? md[1].slice(corte).replace(/^Emiss\S{0,3}\s*:?/i, '') : '';
+          const dm = resto.match(/([\dOo][\dOo\s]{0,2}\/[\dOo\s]{1,3}\/[\dOo][\dOo\s]{2,5})/);
+          d = [null, endTxt.trim(), dm ? dm[1].replace(/\s+/g, '') : ''];
+        }
+        const e = d ? separaEndereco(d[1]) : {razao: '', rua: '', bairro: '', cidade: '', uf: 'PR'};
+        const emissao = d && d[2] ? toISO(d[2]) : '';
+        stubs.push({numDoc: nf.numDoc, serie: '', razao: e.razao, rua: e.rua.replace(/,\s*0\s*$/, ''), bairro: e.bairro, cidade: e.cidade, uf: e.uf, emissao,
+                    valor: vt ? num(vt[1].replace(/[.,]$/, '')) : null, faltando: !d});
+      });
+    });
+    if(!stubs.length) return {ok:false, erro:'Não achei os recibos (com endereço) neste PDF. O romaneio precisa ser impresso com as páginas dos destinatários.', cab, tabela};
+  
+    const avisos = ['⚠️ Este PDF é uma imagem: o programa leu por leitura de imagem. Confira nomes, endereços e valores antes de importar.'];
+    // NF lida diferente nos dois lugares (erro de leitura de 1 dígito): corrige pela tabela
+    const docsTabela = Object.keys(tabela).filter(d => /^\d+$/.test(d));
+    const docsStub = new Set(stubs.map(s => s.numDoc));
+    stubs.forEach(s => {
+      if(docsTabela.length && !docsTabela.includes(s.numDoc)){
+        const livres = docsTabela.filter(d => !docsStub.has(d) && d.length === s.numDoc.length);
+        const quase = livres.filter(d => { let n = 0; for(let i = 0; i < d.length; i++) if(d[i] !== s.numDoc[i]) n++; return n <= 1; });
+        if(quase.length === 1){ avisos.push(`NF ${s.numDoc} lida diferente na tabela (${quase[0]}); usei a da tabela.`); s.numDoc = quase[0]; docsStub.add(quase[0]); }
+      }
+    });
+    const paradas = stubs.map(s => { const t = tabela[s.numDoc] || {pedido:'', codCliente:'', fan:[]}; return {...s, pedido: t.pedido, codCliente: t.codCliente, fantasia: (t.fan || []).join(' ').replace(/\s+-\s*$/, '').trim()}; });
+    docsTabela.filter(d => !paradas.some(p => p.numDoc === d)).forEach(d => avisos.push(`NF ${d} aparece na tabela mas não achei o recibo com endereço.`));
+    if(totalDeclarado != null){
+      const soma = Math.round(paradas.reduce((t, p) => t + (p.valor || 0), 0) * 100) / 100;
+      if(Math.abs(soma - totalDeclarado) > 0.01) avisos.push(`A soma das NFs lidas (${soma.toFixed(2).replace('.', ',')}) não bate com o total do romaneio (${totalDeclarado.toFixed(2).replace('.', ',')}): alguma nota foi lida errada.`);
+    }
+    paradas.filter(p => p.faltando).forEach(p => avisos.push(`NF ${p.numDoc}: não consegui ler o endereço. Preencha na tela antes de importar.`));
+    return {ok:true, cab, totalDeclarado, paradas, avisos, viaOCR:true};
+  }
+  
+  async function lerPorImagem(file){
+    setImportStatus('🔎 Este PDF é uma imagem. Lendo o romaneio por leitura de imagem (leva de 10 a 30 segundos)...');
+    try{
+      const resp = await fetch('/api/ocr', {method:'POST', headers:{'X-Roteiriza':'1'}, body:file});
+      const j = await resp.json();
+      if(!j.ok) return {ok:false, erro:j.erro || 'Não consegui ler a imagem.'};
+      const cidades = Array.from(document.querySelectorAll('#cidades-list option')).map(o => o.value);
+      const r = romaneioParseOCR(j.paginas, cidades);
+      r.msPdf = Math.round((j.segundos || 0) * 1000);
+      return r;
+    }catch(e){ return {ok:false, erro:'Falha na leitura de imagem: ' + (e.message || e)}; }
+  }
+
   // ---------- leitura do PDF ----------
   async function lerPDF(file){
     if(!window.pdfjsLib) return {ok:false, erro:'O leitor de PDF não carregou nesta página.'};
@@ -3607,7 +3785,13 @@ function romaneioParse(pages){
         const tc = await (await doc.getPage(p)).getTextContent();
         pages.push(tc.items.map(i => ({s:i.str, x:i.transform[4], y:i.transform[5]})));
       }
-      const res = romaneioParse(pages); res.msPdf = Math.round(performance.now() - t0); return res;
+      const res = romaneioParse(pages); res.msPdf = Math.round(performance.now() - t0);
+      const trechos = pages.reduce((t, p) => t + p.filter(i => i.s && i.s.trim()).length, 0);
+      if(!res.ok && trechos < 25){   // PDF sem texto = o sistema imprimiu o relatório como imagem
+        if(window.__roteirizaExe) return await lerPorImagem(file);
+        return {ok:false, erro:'Este PDF é uma imagem (sem texto). A leitura de imagem só existe no programa (.exe).'};
+      }
+      return res;
     }catch(e){ console.error(e); return {ok:false, erro:'Não consegui abrir este PDF ('+(e && e.message || e)+').'}; }
   }
 
@@ -3665,12 +3849,15 @@ function romaneioParse(pages){
         const c0 = consultaDe(p), mesmoLocal = vistosLocal.get(addressKey({endereco:c0.endereco, cidade:c0.cidade}));
         if(!mesmoLocal) vistosLocal.set(addressKey({endereco:c0.endereco, cidade:c0.cidade}), p.numDoc);
         const nome = p.fantasia || p.razao;
-        return `<tr class="${dup?'rom-dup':''}">
+        const ed = !!r.viaOCR;   // veio de imagem: campos editáveis (a leitura pode errar uma letra)
+        const campo = (f, val, ph) => `<input class="rom-ed" data-i="${i}" data-f="${f}" value="${esc(val == null ? '' : val)}" placeholder="${ph}">`;
+        const faltaEnd = ed && (!p.rua || !p.cidade);
+        return `<tr class="${dup?'rom-dup':''}" ${faltaEnd ? 'style="background:#FDECEA;"' : ''}>
           <td><input type="checkbox" data-i="${i}" ${dup?'':'checked'}></td>
-          <td><b>${esc(nome)}</b>${p.fantasia && p.razao && p.fantasia!==p.razao ? `<div class="rom-sub">${esc(p.razao)}</div>`:''}</td>
-          <td>${esc(p.rua)}${p.bairro?` - ${esc(p.bairro)}`:''}<div class="rom-sub">${esc(cidadeBonita(p.cidade))}</div>${mesmoLocal ? `<div class="rom-sub" style="color:var(--teal);">mesmo local da NF ${esc(mesmoLocal)} · uma cobrança só</div>` : ''}</td>
+          <td>${ed ? campo('fantasia', nome, 'Cliente') : `<b>${esc(nome)}</b>${p.fantasia && p.razao && p.fantasia!==p.razao ? `<div class="rom-sub">${esc(p.razao)}</div>`:''}`}</td>
+          <td>${ed ? campo('rua', p.rua, 'Rua, número') + '<div style="display:flex; gap:4px; margin-top:3px;">' + campo('bairro', p.bairro, 'Bairro') + campo('cidade', p.cidade ? cidadeBonita(p.cidade) : '', 'Cidade') + '</div>' : `${esc(p.rua)}${p.bairro?` - ${esc(p.bairro)}`:''}<div class="rom-sub">${esc(cidadeBonita(p.cidade))}</div>`}${mesmoLocal ? `<div class="rom-sub" style="color:var(--teal);">mesmo local da NF ${esc(mesmoLocal)} · uma cobrança só</div>` : ''}</td>
           <td class="rom-r">${esc(p.numDoc)}${dup?'<div class="rom-sub" style="color:var(--red)">já está no app · será direcionado ao entregador</div>':''}</td>
-          <td class="rom-r">${p.valor!=null ? 'R$ '+formatValorBR(p.valor) : ''}</td></tr>`;
+          <td class="rom-r">${ed ? campo('valor', p.valor != null ? formatValorBR(p.valor) : '', 'Valor') : (p.valor!=null ? 'R$ '+formatValorBR(p.valor) : '')}</td></tr>`;
       }).join('');
       const nomeDiferente = existente && semAcento(existente.nome) !== semAcento(cab.motorista);
       const opcoes = [];
@@ -3699,6 +3886,7 @@ function romaneioParse(pages){
       r.tempos = r.tempos || {}; r.tempos.tela = Date.now();
       const geo0 = Object.assign({}, geoStats);
       (async () => {   // localiza os endereços já enquanto você confere (os conhecidos voltam na hora)
+        if(r.viaOCR) return;   // lido por imagem: a pessoa ainda vai corrigir os endereços
         for(const p of r.paradas){ if(cancelado) break; if(jaTem(p)) continue; try{ await geocode(consultaDe(p).q); }catch(e){} }
         if(!cancelado){ mapaFim = Date.now(); geoFim = Object.assign({}, geoStats); }
       })();
@@ -3707,6 +3895,12 @@ function romaneioParse(pages){
       const temDup = r.paradas.some(jaTem);
       const contar = () => { const n = ov.querySelectorAll('tbody input:checked').length; okBtn.textContent = n ? `Importar ${n} pedido(s)` : (temDup ? 'Direcionar ao entregador' : 'Importar 0 pedido(s)'); okBtn.disabled = n === 0 && !temDup; };
       ov.addEventListener('change', contar); contar();
+      ov.addEventListener('input', e => {   // edição dos campos lidos por imagem
+        const el = e.target; if(!el.dataset || !el.dataset.f) return;
+        const p = r.paradas[+el.dataset.i]; if(!p) return;
+        if(el.dataset.f === 'valor') p.valor = parseValorBR(el.value); else p[el.dataset.f] = el.value;
+        const tr = el.closest('tr'); if(tr) tr.style.background = (p.rua && p.cidade) ? '' : '#FDECEA';
+      });
       const selMot = ov.querySelector('#rom-mot');
       if(selMot){ const w = ov.querySelector('#rom-veic-wrap'); const f = () => { if(w) w.style.display = selMot.value === '__novo__' ? 'inline' : 'none'; }; selMot.addEventListener('change', f); f(); }
       ov.querySelector('#rom-cancel').onclick = () => fechar(false);
@@ -4054,21 +4248,52 @@ function romaneioParse(pages){
     ov.querySelector('#imp-remover').disabled = s.ocupado || s.instalada !== true;
     ov.querySelector('#imp-testar').disabled = s.ocupado || s.instalada !== true;
     ov.querySelector('#imp-reparar').disabled = s.ocupado || !s.exe;
+    ov.querySelector('#imp-comparar').disabled = s.ocupado || !s.exe;
     if(!s.exe) ov.querySelector('#imp-msg').textContent = 'A impressora só pode ser instalada pelo programa .exe.';
+  }
+  const escHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const postTexto = async (p, txt) => (await fetch(p, {method:'POST', headers:H, body:txt})).json();
+  async function pintarConfig(){
+    if(!ov) return;
+    const c = await get('/api/config');
+    ov.querySelector('#cfg-vis').textContent = c.pasta_romaneios;
+    const l = ov.querySelector('#cfg-erp-lista');
+    l.innerHTML = (c.pastas_erp || []).map(p => `<span style="display:block;">📁 ${escHtml(p)} · <a href="#" data-rm="${escHtml(p)}">remover</a></span>`).join('');
+    l.querySelectorAll('[data-rm]').forEach(a => a.onclick = async e => { e.preventDefault(); await postTexto('/api/pasta-erp/remover', a.dataset.rm); pintarConfig(); });
+    const ck = ov.querySelector('#cfg-inicio'); ck.checked = c.inicio_automatico === true; ck.disabled = !c.exe;
   }
   function abrir(){
     if(ov) return;
     ov = document.createElement('div'); ov.className = 'rom-overlay';
-    ov.innerHTML = `<div class="rom-modal" style="max-width:520px">
-      <h2>🖨️ Impressora e programa</h2>
+    ov.innerHTML = `<div class="rom-modal" style="max-width:700px; overflow:auto;">
+      <h2>🖨️ Como o romaneio chega · programa</h2>
+      <div class="rom-box" style="margin-top:10px">
+        <b>3 jeitos de o programa ler o romaneio</b>
+        <div class="rom-sub" style="margin-top:6px; line-height:1.55;">
+          <b>1) Pasta "Romaneios" (o mais simples, sem impressora):</b> salve o PDF do relatório em
+          <b id="cfg-vis">...</b> <button class="btn btn-ghost" id="cfg-abrir" style="padding:3px 10px; font-size:12px;">Abrir pasta</button>.
+          Ele é lido na hora e some da pasta.<br>
+          <b>2) Pasta do ERP (opcional):</b> se o sistema salva os PDFs numa pasta, cole o caminho dela:
+          <span style="display:flex; gap:6px; margin:4px 0;"><input id="cfg-erp" placeholder="Ex.: D:\\ERP\\Relatorios" style="flex:1;"><button class="btn btn-ghost" id="cfg-erp-add" style="padding:3px 12px;">Adicionar</button></span>
+          <span id="cfg-erp-lista"></span>
+          Todo PDF <u>novo</u> que cair lá é lido sozinho (os antigos são ignorados e nada é apagado).<br>
+          <b>3) Impressora "Romaneio Freedom":</b> o sistema imprime nela (veja abaixo).<br>
+          <b>PDF em imagem (sem texto)?</b> O programa lê por leitura de imagem (10 a 30 s) e deixa os campos editáveis para você corrigir antes de importar.
+        </div>
+        <label style="margin-top:8px;"><input type="checkbox" id="cfg-inicio"> Abrir junto com o Windows (minimizado), para já estar pronto quando o romaneio chegar</label>
+      </div>
+      <h3 style="margin:14px 0 0; font-size:15px;">Impressora "Romaneio Freedom"</h3>
       <div class="rom-box" style="margin-top:10px"><b id="imp-estado">...</b><div class="rom-sub" id="imp-msg" style="margin-top:4px; white-space:pre-wrap"></div></div>
       <p class="rom-sub">Depois de instalada (uma vez por computador), imprima o romaneio do sistema na impressora <b>Romaneio Freedom</b>: o Roteiriza abre sozinho na tela de conferência.</p>
+      <p class="rom-sub" style="background:#FFF4DC; border:1px solid #EE9B00; border-radius:8px; padding:8px 10px;"><b>Sistema em Área de Trabalho Remota?</b> Imprima só na impressora que tem <b>"(redirecionada ...)"</b> no nome: é a que volta para este computador. Cópias com outro nome ficam presas no servidor ("Spooling"). Dica: ao conectar, em Recursos Locais &gt; Impressoras &gt; Mais, marque só a "Romaneio Freedom", e saia com <b>Sair</b> (logoff) em vez de só fechar a janela.</p>
       <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px">
         <button class="btn btn-primary" id="imp-instalar">Instalar impressora</button>
         <button class="btn btn-ghost" id="imp-testar">Testar impressora</button>
         <button class="btn btn-ghost" id="imp-reparar">Reparar impressão</button>
+        <button class="btn btn-ghost" id="imp-comparar">Comparar com a Etiqueta Freedom</button>
         <button class="btn btn-ghost" id="imp-remover">Remover impressora</button>
         <button class="btn btn-ghost" id="imp-pasta">Abrir pasta dos dados</button>
+        <button class="btn btn-ghost" id="imp-entrada">Abrir pasta da impressora</button>
         <button class="btn btn-ghost" id="imp-sair">Encerrar o programa</button>
       </div>
       <div class="rom-actions"><button class="btn btn-ghost" id="imp-fechar">Fechar</button></div></div>`;
@@ -4077,9 +4302,22 @@ function romaneioParse(pages){
     ov.querySelector('#imp-remover').onclick = async () => { if(confirm('Remover a impressora "Romaneio Freedom"?')){ await post('/api/impressora/remover'); pintar(); } };
     ov.querySelector('#imp-testar').onclick = async () => { await post('/api/impressora/testar'); pintar(); };
     ov.querySelector('#imp-reparar').onclick = async () => { if(confirm('Limpar a fila de impressão do Windows? Documentos que estiverem esperando em QUALQUER impressora serão cancelados.')){ await post('/api/impressora/reparar'); pintar(); } };
+    ov.querySelector('#imp-comparar').onclick = async () => { await post('/api/impressora/comparar'); pintar(); };
     ov.querySelector('#imp-pasta').onclick = () => post('/api/abrir-pasta');
+    ov.querySelector('#imp-entrada').onclick = () => post('/api/abrir-pasta?qual=entrada');
     ov.querySelector('#imp-sair').onclick = async () => { if(confirm('Encerrar o Roteiriza? (Imprimir um romaneio abre ele de novo sozinho.)')){ await post('/api/sair'); } };
     ov.querySelector('#imp-fechar').onclick = () => { clearInterval(timer); ov.remove(); ov = null; };
+    ov.querySelector('#cfg-abrir').onclick = () => post('/api/abrir-pasta?qual=romaneios');
+    ov.querySelector('#cfg-erp-add').onclick = async () => {
+      const campo = ov.querySelector('#cfg-erp'); const r = await postTexto('/api/pasta-erp', campo.value);
+      if(!r.ok) alert(r.erro || 'Não consegui adicionar essa pasta.'); else campo.value = '';
+      pintarConfig();
+    };
+    ov.querySelector('#cfg-inicio').onchange = async e => {
+      const r = await post('/api/inicio-automatico?ligar=' + (e.target.checked ? 1 : 0));
+      if(!r.ok){ alert(r.erro || 'Não consegui mudar.'); e.target.checked = !e.target.checked; }
+    };
+    pintarConfig();
     pintar(); timer = setInterval(pintar, 1500);
   }
   window.abrirPainelImpressora = abrir;

@@ -94,6 +94,61 @@ def resumo_diagnostico(texto):
     return "A impressora existe e a pasta está certa, mas o Windows não gravou o PDF."
 
 
+SCRIPT_COMPARAR = r"""$nomes = @('Romaneio Freedom','Etiqueta Freedom')
+$dados = @{}
+foreach($n in $nomes){
+  $h = [ordered]@{}
+  $p = Get-Printer -Name $n -ErrorAction SilentlyContinue
+  if(-not $p){ $h['existe'] = 'NAO' } else {
+    $h['existe'] = 'sim'; $h['driver'] = $p.DriverName; $h['porta'] = $p.PortName; $h['datatype'] = $p.Datatype
+    $h['processador'] = $p.PrintProcessor; $h['renderizacao'] = $p.RenderingMode; $h['compartilhada'] = $p.Shared
+    $h['guardar_trabalhos'] = $p.KeepPrintedJobs; $h['status'] = $p.PrinterStatus
+    $c = Get-PrintConfiguration -PrinterName $n -ErrorAction SilentlyContinue
+    if($c){ $h['papel'] = $c.PaperSize; $h['cor'] = $c.Color }
+    $pt = Get-PrinterPort -Name $p.PortName -ErrorAction SilentlyContinue
+    if($pt){ $h['monitor_da_porta'] = $pt.Description }
+    $h['trabalhos_na_fila'] = @(Get-PrintJob -PrinterName $n -ErrorAction SilentlyContinue).Count
+  }
+  $dados[$n] = $h
+}
+foreach($n in $nomes){ "[$n]"; foreach($k in $dados[$n].Keys){ "$k = " + $dados[$n][$k] } }
+"--- DIFERENCAS ---"
+$chaves = (@($dados[$nomes[0]].Keys) + @($dados[$nomes[1]].Keys)) | Select-Object -Unique
+foreach($k in $chaves){ $a = [string]$dados[$nomes[0]][$k]; $b = [string]$dados[$nomes[1]][$k]; if($a -ne $b){ "DIF: $k -> Romaneio=[$a] Etiqueta=[$b]" } }
+"""
+
+
+def comparar_com_etiqueta():
+    """Compara as configurações da "Romaneio Freedom" com a "Etiqueta Freedom" (que funciona) e grava o relatório."""
+    try:
+        texto = _powershell(SCRIPT_COMPARAR, 60).strip()
+    except Exception as e:                                   # noqa: BLE001
+        texto = f"ERRO ao comparar: {e}"
+    try:
+        with open(os.path.join(servidor.pasta_dados(), "comparacao_impressoras.txt"), "w", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + texto + "\n")
+    except OSError:
+        pass
+    return texto
+
+
+def resumo_comparacao(texto):
+    """Frase simples: o que é diferente entre as duas (a porta e a fila sempre diferem, não contam)."""
+    t = texto or ""
+    if "ERRO ao comparar" in t:
+        return t.strip().splitlines()[0]
+    if "[Etiqueta Freedom]\nexiste = NAO" in t.replace("\r", ""):
+        return "A impressora \"Etiqueta Freedom\" não existe neste computador, então não há com o que comparar."
+    if "[Romaneio Freedom]\nexiste = NAO" in t.replace("\r", ""):
+        return "A impressora \"Romaneio Freedom\" não está instalada neste computador."
+    difs = [ln[5:].strip() for ln in t.splitlines() if ln.startswith("DIF:")]
+    relevantes = [d for d in difs if not d.startswith(("porta ->", "trabalhos_na_fila ->", "monitor_da_porta ->"))]
+    if not relevantes:
+        return ("As duas impressoras estão configuradas igual (só a porta/pasta é diferente). "
+                "Então a diferença está no documento que o sistema manda ou no caminho dele até aqui.")
+    return "Diferenças entre Romaneio e Etiqueta: " + "; ".join(relevantes)
+
+
 def script_instalar(exe, usuario):
     return f"""$ErrorActionPreference = 'Stop'
 $log = '{_ps(log_instalacao())}'
@@ -207,3 +262,39 @@ def remover():
 
 def reparar():
     return executa_como_admin(script_reparar())
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NOME = "RoteirizaFreedom"
+
+
+def inicio_automatico_ativo():
+    """O programa abre sozinho (minimizado) quando o Windows inicia? None se não dá para saber (fora do Windows)."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, RUN_NOME)
+            return True
+    except FileNotFoundError:
+        return False
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def define_inicio_automatico(ligar):
+    """Liga/desliga a abertura do programa (minimizado) quando o Windows inicia. Só vale para o .exe. Devolve '' ou o erro."""
+    if not eh_exe():
+        return "Isso só funciona no programa .exe (não no código-fonte)."
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            if ligar:
+                winreg.SetValueEx(k, RUN_NOME, 0, winreg.REG_SZ, f'"{sys.executable}" --minimizado')
+            else:
+                try:
+                    winreg.DeleteValue(k, RUN_NOME)
+                except FileNotFoundError:
+                    pass
+        return ""
+    except Exception as e:                           # noqa: BLE001
+        return str(e)

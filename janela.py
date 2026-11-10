@@ -32,7 +32,7 @@ def pasta_perfil():
     return p
 
 
-def abrir(url):
+def abrir(url, minimizada=False):
     """Abre a janela do programa. Devolve o processo (ou None se caiu no navegador padrão)."""
     exe = acha_navegador()
     if not exe:
@@ -41,6 +41,8 @@ def abrir(url):
     args = [exe, f"--app={url}", f"--user-data-dir={pasta_perfil()}",
             "--no-first-run", "--no-default-browser-check", "--disable-sync",
             "--window-size=1366,860"]
+    if minimizada:
+        args.append("--start-minimized")
     try:
         return subprocess.Popen(args)
     except OSError:
