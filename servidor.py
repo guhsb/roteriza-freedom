@@ -55,6 +55,15 @@ def _sub(nome):
 
 
 def pasta_entrada():
+    """Pasta onde a impressora virtual grava o PDF. No Windows fica em C:\\ProgramData\\RoteirizaFreedom\\entrada:
+    caminho curto, sem espaços/parênteses, fora de Downloads/OneDrive e que não muda se a pasta do programa mudar."""
+    if sys.platform == "win32":
+        p = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "RoteirizaFreedom", "entrada")
+        try:
+            os.makedirs(p, exist_ok=True)
+            return p
+        except OSError:
+            pass                                    # sem permissão: usa a pasta do programa
     return _sub("entrada")
 
 
@@ -98,6 +107,7 @@ class Servidor:
         self.ao_chegar = ao_chegar    # callback(nome) quando chega um romaneio
         self.abrir_janela = None      # função que abre a janela do programa (definida pelo app.py)
         self.janela = None            # processo da janela (Edge/Chrome em modo aplicativo)
+        self.total_capturados = 0     # quantos PDFs já chegaram da impressora (usado no teste)
         self.pedido_sair = False      # a página pediu para encerrar o programa
         self.sair_cb = None           # fecha a janela do programa
         self.trazer = None            # traz a janela do programa para a frente
@@ -129,7 +139,8 @@ class Servidor:
         def alvo():
             import impressora_virtual
             try:
-                r = impressora_virtual.instalar() if qual == "instalar" else impressora_virtual.remover()
+                r = {"instalar": impressora_virtual.instalar, "remover": impressora_virtual.remover,
+                     "reparar": impressora_virtual.reparar}[qual]()
             except Exception as e:                      # noqa: BLE001
                 r = f"ERRO: {e}"
             ok = impressora_virtual.impressora_instalada()
@@ -139,9 +150,47 @@ class Servidor:
                 if "ERRO" in (r or ""):
                     self.imp["msg"] = "Não deu certo: " + r.split("ERRO:")[-1].strip()
                 elif qual == "instalar":
-                    self.imp["msg"] = 'Impressora instalada! No sistema, imprima o romaneio na "Romaneio Freedom".'
+                    self.imp["msg"] = 'Impressora instalada! Clique em "Testar impressora" e depois imprima o romaneio na "Romaneio Freedom".'
+                elif qual == "reparar":
+                    self.imp["msg"] = 'Fila de impressão limpa. Clique em "Testar impressora" para conferir.'
                 else:
                     self.imp["msg"] = "Impressora removida."
+        threading.Thread(target=alvo, daemon=True).start()
+
+    def testar_impressora(self):
+        """Imprime uma página de teste e espera o PDF chegar; se não chegar, diz o motivo provável."""
+        with self.lock:
+            if self.imp["ocupado"]:
+                return
+            self.imp["ocupado"] = True
+            self.imp["msg"] = "Enviando uma página de teste para a impressora..."
+
+        def alvo():
+            import impressora_virtual
+            antes = self.total_capturados
+            t0 = time.time()
+            erro = impressora_virtual.enviar_teste()
+            chegou = False
+            while time.time() - t0 < 25:
+                if self.total_capturados > antes:
+                    chegou = True
+                    break
+                time.sleep(0.5)
+            if chegou:
+                msg = (f"✅ A impressora funciona: o PDF de teste chegou em {time.time() - t0:.0f} s. "
+                       "Se o romaneio do sistema ainda travar, o problema está na impressão do sistema, não na impressora.")
+            else:
+                diag = impressora_virtual.diagnostico()
+                try:
+                    with open(os.path.join(pasta_dados(), "diagnostico_impressora.log"), "w", encoding="utf-8") as f:
+                        f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "\n" + (erro or "") + "\n" + diag + "\n")
+                except OSError:
+                    pass
+                msg = ("❌ O PDF de teste não chegou em 25 s. " + impressora_virtual.resumo_diagnostico(diag) +
+                       ' Clique em "Reparar impressão". Se continuar assim, me mande o arquivo dados\\diagnostico_impressora.log.')
+            with self.lock:
+                self.imp["ocupado"] = False
+                self.imp["msg"] = msg
         threading.Thread(target=alvo, daemon=True).start()
 
     @staticmethod
@@ -183,6 +232,7 @@ class Servidor:
                 "mtime": int(c[0] / 1e6), "capturado": int(time.time() * 1000)}   # ms: quando o PDF foi gravado / capturado
         with self.lock:
             self.fila.append(item)
+            self.total_capturados += 1
         if self.abrir_janela and not self.janela_viva() and time.time() - self.ultimo_poll > 8:
             try:                                    # nenhuma janela aberta: abre o programa
                 self.abrir_janela()
@@ -315,8 +365,11 @@ class Servidor:
                 if not self._escrita_ok():
                     return self._resp(403, {"erro": "negado"})
                 u = urlparse(self.path)
-                if u.path in ("/api/impressora/instalar", "/api/impressora/remover"):
+                if u.path in ("/api/impressora/instalar", "/api/impressora/remover", "/api/impressora/reparar"):
                     srv.acao_impressora(u.path.rsplit("/", 1)[-1])
+                    return self._resp(200, {"ok": True})
+                if u.path == "/api/impressora/testar":
+                    srv.testar_impressora()
                     return self._resp(200, {"ok": True})
                 if u.path == "/api/abrir-pasta":
                     if hasattr(os, "startfile"):

@@ -341,7 +341,6 @@
         <input type="file" id="file-import-romaneio" accept=".pdf,application/pdf" multiple style="display:none;">
         <button class="btn-import-route" id="btn-rom-watch" type="button">🖨️ Monitorar pasta de romaneios</button>
         <button class="btn-import-route" id="btn-import-routes" type="button">📥 Importar rotas</button>
-        <button class="btn-import-route" id="btn-send-financeiro" type="button">💰 Enviar para financeiro</button>
         <input type="file" id="file-import-routes" accept=".csv" style="display:none;">
       </div>
     </div>
@@ -352,6 +351,7 @@
 
   <div class="actions-bar">
     <button class="btn btn-primary" id="btn-generate">Gerar rotas</button>
+    <button class="btn" id="btn-send-financeiro" type="button" style="background:var(--teal); color:#fff; border-color:var(--teal);">💰 Enviar para financeiro</button>
     <div style="display:flex; align-items:center; gap:6px;">
       <label for="romaneio-date" style="margin:0; font-size:11px; color:var(--muted); font-weight:600; white-space:nowrap;">Data do romaneio</label>
       <input type="date" id="romaneio-date" style="width:150px;">
@@ -391,6 +391,7 @@
       <input type="text" id="fm-nome" placeholder="Nome do entregador" required>
       <input type="text" id="fm-data" placeholder="Data (ex: 24/07/2026)" required>
       <input type="text" id="fm-valor" placeholder="Valor (ex: 150,00)" required>
+      <input type="text" id="fm-rom" placeholder="Nº do romaneio (opcional)">
       <button class="print-btn" type="submit" id="form-financeiro-manual-submit">➕ Lançar manual</button>
       <button class="btn btn-ghost" type="button" id="btn-cancel-edit-financeiro" style="display:none;">Cancelar edição</button>
     </form>
@@ -690,7 +691,18 @@ function uid(){ return Math.random().toString(36).slice(2,9); }
 
 // normaliza endereço+cidade pra detectar "mesmo endereço" (2º, 3º pedido pro mesmo lugar não conta parada extra)
 function addressKey(o){
-  return `${(o.endereco||'').trim().toLowerCase()}|${(o.cidade||'').trim().toLowerCase()}`;
+  // "mesmo local" = mesma rua + número + cidade. Ignora caixa, acento, abreviação (AV = Avenida, EST = Estrada) e bairro,
+  // para a mesma loja escrita de outro jeito não ser cobrada duas vezes. Sem número, só junta se o texto todo for igual
+  // (senão juntaria lugares diferentes da mesma rodovia).
+  const cidade = normalizeAddrText(o.cidade || '');
+  let {rua, numero} = separaEndereco(o.endereco || '');
+  if(!numero){   // "Rua X, 116, Bairro": o bairro vem depois do número, separado por vírgula
+    const m = String(o.endereco || '').split(/\s+-\s+/)[0].match(/^(.*?),\s*(\d+[A-Za-z]?)\s*,.*$/);
+    if(m){ rua = m[1]; numero = m[2]; }
+  }
+  const ruaN = normalizeAddrText(normalizaLogradouro(rua));
+  if(ruaN && numero && !/^km/i.test(numero)) return `${ruaN}|${String(numero).toLowerCase().replace(/\s+/g, '')}|${cidade}`;
+  return `${normalizeAddrText(o.endereco || '')}|${cidade}`;
 }
 // conta paradas únicas por endereço (vários pedidos pro mesmo endereço = 1 parada só)
 function uniqueStopCount(stops){
@@ -1127,6 +1139,10 @@ function numDocBadge(o){
   if(!o.numDoc) return '';
   return `<span class="tag">Doc: ${o.numDoc}</span>`;
 }
+function romaneioBadge(o){
+  if(!o.romaneio) return '';
+  return `<span class="tag" style="background:#E8F0FE; color:#1D4ED8;">Rom. ${o.romaneio}</span>`;
+}
 function codClienteBadge(o){
   if(!o.codCliente) return '';
   return `<span class="tag">Cód: ${o.codCliente}</span>`;
@@ -1269,6 +1285,7 @@ function renderOrders(){
         ${codClienteBadge(o)}
         ${vendedorBadge(o)}
         ${numDocBadge(o)}
+        ${romaneioBadge(o)}
         ${prioBadge(o.prioridade)}
         ${motoristaBadge(o)}
         ${semCompativel ? '<span class="tag tag-dist-far">sem entregador compatível</span>' : ''}
@@ -2116,6 +2133,31 @@ async function generateRoutes(){
     return;
   }
 
+  // Um romaneio é de UM entregador só: pedido do romaneio sem entregador vai para o mesmo entregador dos outros pedidos
+  // dele; se nenhum tem entregador, a carga toda vai para um entregador só. Nunca reparte entre motoristas.
+  // (quem já tem entregador escolhido, ou está como PENDENTE, não é mexido)
+  const porRomaneio = {};
+  orders.forEach(o => { if(o.romaneio && o.motoristaId !== 'PENDENTE') (porRomaneio[o.romaneio] = porRomaneio[o.romaneio] || []).push(o); });
+  let mexeuRomaneio = false;
+  Object.values(porRomaneio).forEach(lista => {
+    const valido = id => id && drivers.some(d => d.id === id);
+    const semEntregador = lista.filter(o => !valido(o.motoristaId));
+    if(semEntregador.length === 0) return;
+    const cont = {};
+    lista.forEach(o => { if(valido(o.motoristaId)) cont[o.motoristaId] = (cont[o.motoristaId] || 0) + 1; });
+    let alvo = Object.keys(cont).sort((a, b) => cont[b] - cont[a])[0];
+    if(!alvo){
+      const precisaCarro = lista.some(o => o.tamanho === 'grande');
+      const cand = drivers.filter(d => !precisaCarro || d.veiculo === 'carro');
+      if(cand.length === 0) return;
+      const carga = id => orders.filter(o => o.motoristaId === id).length;
+      alvo = cand.reduce((a, b) => (PRIO_WEIGHT[b.prioridade] * 6 + carga(b.id)) < (PRIO_WEIGHT[a.prioridade] * 6 + carga(a.id)) ? b : a, cand[0]).id;
+    }
+    semEntregador.forEach(o => { o.motoristaId = alvo; });
+    mexeuRomaneio = true;
+  });
+  if(mexeuRomaneio) await saveOrders();
+
   // prioridade do pedido primeiro, depois data
   const sortedOrders = [...orders].sort((a,b)=> PRIO_WEIGHT[a.prioridade]-PRIO_WEIGHT[b.prioridade] || a.data.localeCompare(b.data));
   const routeMap = {}; drivers.forEach(d=> routeMap[d.id] = []);
@@ -2335,7 +2377,7 @@ function renderRoutesBox(){
               <div class="row">${distBadge(o)}</div>
               <div class="row"><span class="tag ${tamanhoTagClass(o.tamanho)}">display: ${tamanhoLabel(o.tamanho)}</span></div>
               <div class="row">${pedidoBadge(o)}</div>
-              <div class="row">${codClienteBadge(o)}${vendedorBadge(o)}${numDocBadge(o)}</div>
+              <div class="row">${codClienteBadge(o)}${vendedorBadge(o)}${numDocBadge(o)}${romaneioBadge(o)}</div>
               <div class="row">${valorEntregaBadge(rv.perOrder[o.id])}</div>
               ${o.motoristaId ? '<div class="row"><span class="tag tag-manual">atribuição manual</span></div>' : ''}
             </div>
@@ -2412,10 +2454,10 @@ function exportOrdersCSV(){
     alert(orderTabMode === 'pendentes' ? 'Nenhum pedido pendente no momento.' : 'Nenhum pedido cadastrado ainda.');
     return;
   }
-  const headers = ['Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Data','Tamanho Display','Tamanho Pedido','Prioridade','Motorista Atribuído','Distância (km)','Nº Doc','Val. Total','Observação'];
+  const headers = ['Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Data','Tamanho Display','Tamanho Pedido','Prioridade','Motorista Atribuído','Distância (km)','Nº Doc','Val. Total','Observação','Romaneio'];
   const rows = list.map(o=>{
     const motoristaLabel = o.motoristaId === 'PENDENTE' ? 'PENDENTE' : (o.motoristaId ? (drivers.find(d=>d.id===o.motoristaId)?.nome || '') : '');
-    return [o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, o.data, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.prioridade, motoristaLabel, o.distKm!=null?o.distKm.toFixed(1):'', o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', o.obs||''];
+    return [o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, o.data, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.prioridade, motoristaLabel, o.distKm!=null?o.distKm.toFixed(1):'', o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', o.obs||'', o.romaneio||''];
   });
   const sufixo = orderTabMode === 'pendentes' ? 'pendentes' : 'todos';
   downloadCSV(`pedidos-${sufixo}-${new Date().toISOString().slice(0,10)}.csv`, headers, rows);
@@ -2443,14 +2485,14 @@ function exportRoutesCSV(){
   const driverIds = Object.keys(lastRoutes).filter(id=>lastRoutes[id].length>0);
   if(driverIds.length === 0){ alert('Gere as rotas primeiro (botão "Gerar rotas").'); return; }
   const geradoEm = formatGeneratedAt(routesGeneratedAt);
-  const headers = ['Motorista','Veículo','Parada','Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Tamanho Display','Tamanho Pedido','Data','Prioridade','Nº Doc','Val. Total','Valor Entrega','Observação','Gerado em'];
+  const headers = ['Motorista','Veículo','Parada','Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Tamanho Display','Tamanho Pedido','Data','Prioridade','Nº Doc','Val. Total','Valor Entrega','Observação','Gerado em','Romaneio'];
   const rows = [];
   driverIds.forEach(id=>{
     const d = drivers.find(x=>x.id===id);
     const stops = lastRoutes[id];
     const valoresEntrega = buildValorEntregaPorParada(stops);
     stops.forEach((o,i)=>{
-      rows.push([d?d.nome:'', d?d.veiculo:'', i+1, o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.data, o.prioridade, o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', formatValorBR(valoresEntrega[i]), o.obs||'', geradoEm]);
+      rows.push([d?d.nome:'', d?d.veiculo:'', i+1, o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.data, o.prioridade, o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', formatValorBR(valoresEntrega[i]), o.obs||'', geradoEm, o.romaneio||'']);
     });
     rows.push(...buildLinhasExtrasRota(d, id, geradoEm));
   });
@@ -2463,8 +2505,8 @@ function exportRouteCSV(driverId){
   const d = drivers.find(x=>x.id===driverId);
   const geradoEm = formatGeneratedAt(routesGeneratedAt);
   const valoresEntrega = buildValorEntregaPorParada(stops);
-  const headers = ['Motorista','Veículo','Parada','Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Tamanho Display','Tamanho Pedido','Data','Prioridade','Nº Doc','Val. Total','Valor Entrega','Observação','Gerado em'];
-  const rows = stops.map((o,i)=>[d?d.nome:'', d?d.veiculo:'', i+1, o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.data, o.prioridade, o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', formatValorBR(valoresEntrega[i]), o.obs||'', geradoEm]);
+  const headers = ['Motorista','Veículo','Parada','Cliente','Cód. Cliente','Vendedor','Endereço','Cidade','Tamanho Display','Tamanho Pedido','Data','Prioridade','Nº Doc','Val. Total','Valor Entrega','Observação','Gerado em','Romaneio'];
+  const rows = stops.map((o,i)=>[d?d.nome:'', d?d.veiculo:'', i+1, o.cliente, o.codCliente||'', o.vendedor||'', o.endereco, o.cidade, tamanhoLabel(o.tamanho), o.tamanhoPedido||'', o.data, o.prioridade, o.numDoc||'', o.valTotal!=null?formatValorBR(o.valTotal):'', formatValorBR(valoresEntrega[i]), o.obs||'', geradoEm, o.romaneio||'']);
   rows.push(...buildLinhasExtrasRota(d, driverId, geradoEm));
   const nomeArquivo = (d?d.nome:'rota').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
   downloadCSV(`rota-${nomeArquivo}-${new Date().toISOString().slice(0,10)}.csv`, headers, rows);
@@ -2558,9 +2600,9 @@ function setImportStatus(msg){
   if(box) box.textContent = msg;
 }
 
-async function geocodeAndPushOrder({cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal, obs}){
+async function geocodeAndPushOrder({cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal, obs, romaneio, romaneioData}){
   const geo = await geocode(`${endereco}, ${cidade}, PR, Brasil`);
-  const order = {id:uid(), cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal: valTotal!=null?valTotal:null, obs, lat:null, lon:null, distKm:null, geo:'failed', geoScore:null, geoFoundAddress:null};
+  const order = {id:uid(), cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal: valTotal!=null?valTotal:null, obs, romaneio:romaneio||'', romaneioData:romaneioData||'', lat:null, lon:null, distKm:null, geo:'failed', geoScore:null, geoFoundAddress:null};
   applyGeocodeResult(order, geo);
   orders.push(order);
 }
@@ -2573,7 +2615,7 @@ async function importOrdersCSV(file){
   const iCliente = headerIndex(header,'cliente'), iEndereco = headerIndex(header,'endereço'), iCidade = headerIndex(header,'cidade'),
         iData = headerIndex(header,'data'), iTamDisplay = headerIndex(header,'tamanho display'), iTamPedido = headerIndex(header,'tamanho pedido'),
         iPrioridade = headerIndex(header,'prioridade'), iMotorista = headerIndex(header,'motorista atribuído'), iNumDoc = headerIndex(header,'nº doc'),
-        iCodCliente = headerIndex(header,'cód. cliente'), iVendedor = headerIndex(header,'vendedor'), iObs = headerIndex(header,'observação'), iValTotal = headerIndex(header,'val. total');
+        iCodCliente = headerIndex(header,'cód. cliente'), iVendedor = headerIndex(header,'vendedor'), iObs = headerIndex(header,'observação'), iValTotal = headerIndex(header,'val. total'), iRomaneio = headerIndex(header,'romaneio');
   if(iCliente === -1 || iEndereco === -1){ setImportStatus('⚠️ Esse CSV não parece ser de pedidos exportados por este app (faltam colunas Cliente/Endereço).'); return; }
 
   const dataRows = rows.slice(1).filter(r=>r.some(c=>c.trim()!==''));
@@ -2599,6 +2641,7 @@ async function importOrdersCSV(file){
     const valTotal = iValTotal>-1 ? parseValorBR(r[iValTotal]) : null;
     const codCliente = iCodCliente>-1 ? (r[iCodCliente]||'').trim() : '';
     const vendedor = iVendedor>-1 ? (r[iVendedor]||'').trim() : '';
+    const romaneio = (typeof iRomaneio !== 'undefined' && iRomaneio>-1) ? (r[iRomaneio]||'').trim() : '';
     const motoristaRaw = iMotorista>-1 ? (r[iMotorista]||'').trim() : '';
     let motoristaId = null;
     if(motoristaRaw){
@@ -2609,7 +2652,7 @@ async function importOrdersCSV(file){
       }
     }
     btn.textContent = `Importando ${imported+failed+1}/${dataRows.length}...`;
-    await geocodeAndPushOrder({cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal, obs});
+    await geocodeAndPushOrder({cliente, endereco, cidade, data, tamanho, tamanhoPedido, prioridade, motoristaId, codCliente, vendedor, numDoc, valTotal, obs, romaneio});
     imported++;
   }
 
@@ -2837,7 +2880,7 @@ async function importFinanceiroFiles(fileList){
       if(rows.length < 2){ arquivosIgnorados++; continue; }
       const header = rows[0].map(h=>h.trim().toLowerCase());
       const iMotorista = headerIndex(header,'motorista'), iValEntrega = headerIndex(header,'valor entrega'),
-            iData = headerIndex(header,'data'), iGerado = headerIndex(header,'gerado em');
+            iData = headerIndex(header,'data'), iGerado = headerIndex(header,'gerado em'), iRom = headerIndex(header,'romaneio');
       if(iMotorista === -1){ arquivosIgnorados++; continue; }
       // Só aceita a coluna "Valor Entrega" (valor real a pagar ao entregador). O "Val. Total"
       // é o valor da nota do pedido e NUNCA deve ser usado aqui — se o CSV for de antes da
@@ -2850,9 +2893,10 @@ async function importFinanceiroFiles(fileList){
       for(const r of dataRows){
         const nomeRaw = (r[iMotorista]||'').trim();
         if(!nomeRaw) continue;
-        const key = normEntregadorKey(nomeRaw);
-        if(!displayNames[key]) displayNames[key] = toTitleCase(nomeRaw);
-        if(!groups[key]){ groups[key] = {valor:0, dataLabel:''}; groupOrder.push(key); }
+        const key0 = normEntregadorKey(nomeRaw), rom = iRom > -1 ? (r[iRom]||'').trim() : '';
+        const key = key0 + '||' + rom;                       // um grupo por entregador E por romaneio
+        if(!displayNames[key0]) displayNames[key0] = toTitleCase(nomeRaw);
+        if(!groups[key]){ groups[key] = {valor:0, dataLabel:'', key0, rom}; groupOrder.push(key); }
         const valor = parseValorBR(r[iValEntrega]);
         if(valor) groups[key].valor += valor;
         if(!groups[key].dataLabel){
@@ -2867,8 +2911,16 @@ async function importFinanceiroFiles(fileList){
           }
         }
       }
+      // extras/coletas (linhas sem nº de romaneio) entram na carga quando o entregador só tem UM romaneio no arquivo
+      const porEntregador = {};
+      groupOrder.forEach(k=>{ (porEntregador[groups[k].key0] = porEntregador[groups[k].key0] || []).push(k); });
+      Object.values(porEntregador).forEach(ks=>{
+        const nomeados = ks.filter(k=>groups[k].rom), vazios = ks.filter(k=>!groups[k].rom);
+        if(nomeados.length === 1 && vazios.length === 1){ groups[nomeados[0]].valor += groups[vazios[0]].valor; groups[vazios[0]].skip = true; }
+      });
       groupOrder.forEach(key=>{
-        financeiroRotas.push({id:uid(), entregador:displayNames[key], entregadorKey:key, data:groups[key].dataLabel || 'Sem data', valor:groups[key].valor, arquivo:file.name});
+        const g = groups[key]; if(g.skip) return;
+        financeiroRotas.push({id:uid(), entregador:displayNames[g.key0], entregadorKey:g.key0, data:g.dataLabel || 'Sem data', romaneio:g.rom, valor:g.valor, arquivo:file.name});
         rotasImportadas++;
       });
     }catch(e){
@@ -2908,7 +2960,7 @@ function groupFinanceiroRotas(){
     groups[r.entregadorKey].subtotal += (r.valor||0);
   });
   const list = order.map(k=>groups[k]);
-  list.forEach(g=> g.items.sort((a,b)=> finDataSortKey(a.data).localeCompare(finDataSortKey(b.data))));
+  list.forEach(g=> g.items.sort((a,b)=> finDataSortKey(a.data).localeCompare(finDataSortKey(b.data)) || String(a.romaneio||'').localeCompare(String(b.romaneio||''), 'pt-BR', {numeric:true})));
   list.sort((a,b)=> a.entregador.localeCompare(b.entregador, 'pt-BR'));
   const grandTotal = financeiroRotas.reduce((s,r)=> s + (r.valor||0), 0);
   return {list, grandTotal};
@@ -2929,11 +2981,12 @@ function renderFinanceiro(){
           <span class="fin-group-total">R$ ${formatValorBR(g.subtotal)}</span>
         </div>
         <table class="fin-table">
-          <thead><tr><th>Data</th><th>Valor da rota</th><th></th></tr></thead>
+          <thead><tr><th>Data</th><th>Romaneio</th><th>Valor da rota</th><th></th></tr></thead>
           <tbody>
             ${g.items.map(r=>`
               <tr>
                 <td>${r.data}</td>
+                <td>${r.romaneio ? r.romaneio : '—'}${r.extras ? ' <span class="tag">extras/coletas</span>' : ''}</td>
                 <td>R$ ${formatValorBR(r.valor||0)}</td>
                 <td style="white-space:nowrap;">
                   <button class="btn-ghost btn" style="padding:3px 8px; font-size:11px;" onclick="editFinanceiroRota('${r.id}')">editar</button>
@@ -2965,9 +3018,9 @@ function buildFinanceiroPrintHtml(){
       <div class="fin-group">
         <div class="fin-group-title"><span>${g.entregador}</span><span class="fin-group-total">R$ ${formatValorBR(g.subtotal)}</span></div>
         <table class="fin-table">
-          <thead><tr><th>Data</th><th>Valor da rota</th></tr></thead>
+          <thead><tr><th>Data</th><th>Romaneio</th><th>Valor da rota</th></tr></thead>
           <tbody>
-            ${g.items.map(r=>`<tr><td>${r.data}</td><td>R$ ${formatValorBR(r.valor||0)}</td></tr>`).join('')}
+            ${g.items.map(r=>`<tr><td>${r.data}</td><td>${r.romaneio ? r.romaneio : '—'}${r.extras ? ' (extras/coletas)' : ''}</td><td>R$ ${formatValorBR(r.valor||0)}</td></tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -3030,6 +3083,7 @@ function editFinanceiroRota(id){
   document.getElementById('fm-nome').value = r.entregador;
   document.getElementById('fm-data').value = r.data;
   document.getElementById('fm-valor').value = formatValorBR(r.valor||0);
+  document.getElementById('fm-rom').value = r.romaneio || '';
   document.getElementById('form-financeiro-manual-submit').textContent = '💾 Salvar alterações';
   document.getElementById('btn-cancel-edit-financeiro').style.display = 'inline-block';
   document.getElementById('form-financeiro-manual').scrollIntoView({behavior:'smooth', block:'center'});
@@ -3048,6 +3102,7 @@ document.getElementById('form-financeiro-manual').addEventListener('submit', asy
   const nomeInput = document.getElementById('fm-nome');
   const dataInput = document.getElementById('fm-data');
   const valorInput = document.getElementById('fm-valor');
+  const romRaw = (document.getElementById('fm-rom').value || '').trim();
   const nomeRaw = nomeInput.value.trim();
   const dataRaw = dataInput.value.trim();
   const valor = parseValorBR(valorInput.value);
@@ -3057,11 +3112,11 @@ document.getElementById('form-financeiro-manual').addEventListener('submit', asy
   const key = normEntregadorKey(nomeRaw);
   if(editingFinanceiroRotaId){
     const r = financeiroRotas.find(x=>x.id===editingFinanceiroRotaId);
-    if(r){ r.entregador = toTitleCase(nomeRaw); r.entregadorKey = key; r.data = dataRaw; r.valor = valor; }
+    if(r){ r.entregador = toTitleCase(nomeRaw); r.entregadorKey = key; r.data = dataRaw; r.valor = valor; r.romaneio = romRaw; }
     cancelEditFinanceiroRota();
   } else {
-    financeiroRotas.push({id:uid(), entregador:toTitleCase(nomeRaw), entregadorKey:key, data:dataRaw, valor, arquivo:'Lançamento manual'});
-    nomeInput.value = ''; dataInput.value = ''; valorInput.value = '';
+    financeiroRotas.push({id:uid(), entregador:toTitleCase(nomeRaw), entregadorKey:key, data:dataRaw, valor, romaneio:romRaw, arquivo:'Lançamento manual'});
+    nomeInput.value = ''; dataInput.value = ''; valorInput.value = ''; document.getElementById('fm-rom').value = '';
     nomeInput.focus();
   }
   await saveFinanceiroRotas();
@@ -3140,6 +3195,7 @@ function buildRouteTableHtml(driver, stops, metrics){
         </td>
         <td class="c-doc">
           ${o.numDoc ? `<div class="doc-num">${o.numDoc}</div>` : ''}
+          ${o.romaneio ? `<div class="doc-num" style="font-size:10px; font-weight:400;">Rom. ${o.romaneio}</div>` : ''}
           ${o.valTotal!=null ? `<div class="valor">R$ ${formatValorBR(o.valTotal)}</div>` : ''}
         </td>
       </tr>
@@ -3574,6 +3630,18 @@ function romaneioParse(pages){
     if(!window.__roteirizaExe) return;
     try{ fetch('/api/log', {method:'POST', headers:{'X-Roteiriza':'1'}, body:txt}).catch(() => {}); }catch(e){}
   }
+  // acha o entregador cadastrado: nome igual, ou o nome cadastrado é parte do nome completo do romaneio
+  // ("Jonathan" cadastrado x "JONATHAN LUIZ SOARES" no romaneio). Só vale se der UM único candidato.
+  function acharMotorista(nomePdf){
+    if(!nomePdf) return null;
+    const limpa = s => semAcento(s).toLowerCase().replace(/\s+/g, ' ').trim();
+    const alvo = limpa(nomePdf);
+    const exato = drivers.find(d => limpa(d.nome) === alvo);
+    if(exato) return exato;
+    const palavras = new Set(alvo.split(' '));
+    const cand = drivers.filter(d => { const w = limpa(d.nome).split(' ').filter(Boolean); return w.length && w.every(x => palavras.has(x)); });
+    return cand.length === 1 ? cand[0] : null;
+  }
   function consultaDe(p){
     const cidade = cidadeBonita(p.cidade), endereco = p.rua + (p.bairro ? ` - ${p.bairro}` : '');
     return {cidade, endereco, q:`${endereco}, ${cidade}, PR, Brasil`};
@@ -3588,25 +3656,32 @@ function romaneioParse(pages){
   function revisar(r, nomeArquivo){
     return new Promise(resolve => {
       const cab = r.cab;
-      const existente = cab.motorista ? drivers.find(d => semAcento(d.nome) === semAcento(cab.motorista)) : null;
+      const existente = acharMotorista(cab.motorista);
       const jaTem = p => orders.some(o => (o.numDoc||'') === p.numDoc);
       const totalVal = r.paradas.reduce((t,p) => t + (p.valor||0), 0);
+      const vistosLocal = new Map();
       const linhas = r.paradas.map((p,i) => {
         const dup = jaTem(p);
+        const c0 = consultaDe(p), mesmoLocal = vistosLocal.get(addressKey({endereco:c0.endereco, cidade:c0.cidade}));
+        if(!mesmoLocal) vistosLocal.set(addressKey({endereco:c0.endereco, cidade:c0.cidade}), p.numDoc);
         const nome = p.fantasia || p.razao;
         return `<tr class="${dup?'rom-dup':''}">
           <td><input type="checkbox" data-i="${i}" ${dup?'':'checked'}></td>
           <td><b>${esc(nome)}</b>${p.fantasia && p.razao && p.fantasia!==p.razao ? `<div class="rom-sub">${esc(p.razao)}</div>`:''}</td>
-          <td>${esc(p.rua)}${p.bairro?` - ${esc(p.bairro)}`:''}<div class="rom-sub">${esc(cidadeBonita(p.cidade))}</div></td>
-          <td class="rom-r">${esc(p.numDoc)}${dup?'<div class="rom-sub" style="color:var(--red)">já está no app</div>':''}</td>
+          <td>${esc(p.rua)}${p.bairro?` - ${esc(p.bairro)}`:''}<div class="rom-sub">${esc(cidadeBonita(p.cidade))}</div>${mesmoLocal ? `<div class="rom-sub" style="color:var(--teal);">mesmo local da NF ${esc(mesmoLocal)} · uma cobrança só</div>` : ''}</td>
+          <td class="rom-r">${esc(p.numDoc)}${dup?'<div class="rom-sub" style="color:var(--red)">já está no app · será direcionado ao entregador</div>':''}</td>
           <td class="rom-r">${p.valor!=null ? 'R$ '+formatValorBR(p.valor) : ''}</td></tr>`;
       }).join('');
-      const bloqueioMotorista = cab.motorista ? `
+      const nomeDiferente = existente && semAcento(existente.nome) !== semAcento(cab.motorista);
+      const opcoes = [];
+      if(existente) opcoes.push(`<option value="${existente.id}">${esc(existente.nome)} (entregador do romaneio${nomeDiferente ? ': ' + esc(titulo(cab.motorista)) : ''})</option>`);
+      else if(cab.motorista) opcoes.push(`<option value="__novo__">Cadastrar "${esc(titulo(cab.motorista))}" como novo entregador</option>`);
+      drivers.filter(d => !existente || d.id !== existente.id).forEach(d => opcoes.push(`<option value="${d.id}">${esc(d.nome)}</option>`));
+      const bloqueioMotorista = opcoes.length ? `
         <div class="rom-box">
-          <label><input type="checkbox" id="rom-atrib" checked> Atribuir todos os pedidos ao motorista <b>${esc(titulo(cab.motorista))}</b></label>
-          <div class="rom-sub" style="margin-top:4px">${existente
-            ? '✓ já cadastrado. Desmarque se preferir deixar a atribuição automática.'
-            : 'Ainda não está cadastrado — será criado agora como: <select id="rom-veic"><option value="carro">Carro</option><option value="moto">Moto</option></select>'}</div>
+          <label>Entregador deste romaneio <select id="rom-mot">${opcoes.join('')}</select></label>
+          <div class="rom-sub" style="margin-top:4px">Todos os pedidos do romaneio vão para ele: o app não reparte com outro entregador.
+            <span id="rom-veic-wrap" style="display:none"> Veículo do novo entregador: <select id="rom-veic"><option value="carro">Carro</option><option value="moto">Moto</option></select></span></div>
         </div>` : '';
       const avisos = (r.avisos||[]).map(a => `<div class="rom-aviso">⚠️ ${esc(a)}</div>`).join('');
       const ov = document.createElement('div');
@@ -3629,22 +3704,24 @@ function romaneioParse(pages){
       })();
       const fechar = v => { cancelado = true; ov.remove(); resolve(v); };
       const okBtn = ov.querySelector('#rom-ok');
-      const contar = () => { const n = ov.querySelectorAll('tbody input:checked').length; okBtn.textContent = `Importar ${n} pedido(s)`; okBtn.disabled = n === 0; };
+      const temDup = r.paradas.some(jaTem);
+      const contar = () => { const n = ov.querySelectorAll('tbody input:checked').length; okBtn.textContent = n ? `Importar ${n} pedido(s)` : (temDup ? 'Direcionar ao entregador' : 'Importar 0 pedido(s)'); okBtn.disabled = n === 0 && !temDup; };
       ov.addEventListener('change', contar); contar();
+      const selMot = ov.querySelector('#rom-mot');
+      if(selMot){ const w = ov.querySelector('#rom-veic-wrap'); const f = () => { if(w) w.style.display = selMot.value === '__novo__' ? 'inline' : 'none'; }; selMot.addEventListener('change', f); f(); }
       ov.querySelector('#rom-cancel').onclick = () => fechar(false);
       okBtn.onclick = async () => {
         const tClick = Date.now();
         const sel = Array.from(ov.querySelectorAll('tbody input:checked')).map(c => r.paradas[+c.dataset.i]);
         okBtn.disabled = true; ov.querySelector('#rom-cancel').disabled = true;
         let motoristaId = null;
-        const atrib = ov.querySelector('#rom-atrib');
-        if(atrib && atrib.checked){
-          let d = existente;
-          if(!d){
-            d = {id:uid(), nome:titulo(cab.motorista), veiculo:(ov.querySelector('#rom-veic')||{}).value || 'carro', prioridade:'normal'};
-            drivers.push(d); await saveDrivers();
-          }
-          motoristaId = d.id;
+        const dupAntes = r.paradas.filter(p => !sel.includes(p) && jaTem(p)).length;
+        const selMotorista = ov.querySelector('#rom-mot');
+        if(selMotorista){
+          if(selMotorista.value === '__novo__'){
+            const d = {id:uid(), nome:titulo(cab.motorista), veiculo:(ov.querySelector('#rom-veic')||{}).value || 'carro', prioridade:'normal'};
+            drivers.push(d); await saveDrivers(); motoristaId = d.id;
+          } else motoristaId = selMotorista.value;
         }
         const antes = orders.length;
         let n = 0;
@@ -3653,14 +3730,20 @@ function romaneioParse(pages){
           const {cidade, endereco} = consultaDe(p);
           const obs = [p.pedido ? `Pedido ${p.pedido}` : '', cab.romaneio ? `Rom. ${cab.romaneio}` : ''].filter(Boolean).join(' · ');
           await geocodeAndPushOrder({cliente:p.fantasia || p.razao, endereco, cidade, data:p.emissao, tamanho:'pequeno', tamanhoPedido:'pequeno', prioridade:'normal',
-            motoristaId, codCliente:p.codCliente||'', vendedor:'', numDoc:p.numDoc, valTotal:p.valor, obs});
+            motoristaId, codCliente:p.codCliente||'', vendedor:'', numDoc:p.numDoc, valTotal:p.valor, obs, romaneio:cab.romaneio||'', romaneioData:cab.dataSaida||''});
+        }
+        if(motoristaId){   // o romaneio inteiro é dele: inclusive pedidos que já estavam no app (importados antes, sem entregador ou com outro)
+          const docs = new Set(r.paradas.map(p => p.numDoc));
+          orders.forEach(o => { if(docs.has(o.numDoc) && o.motoristaId !== 'PENDENTE'){ o.motoristaId = motoristaId; o.romaneio = o.romaneio || cab.romaneio || ''; o.romaneioData = o.romaneioData || cab.dataSaida || ''; } });
         }
         await saveOrders();
         if(typeof populateMotoristaSelect === 'function') populateMotoristaSelect();
         if(typeof populateColetaMotoristaSelect === 'function') populateColetaMotoristaSelect();
         renderAll(); markRoutesStale();
+        if(cab.dataSaida){ const di = $('romaneio-date'); if(di) di.value = cab.dataSaida; }   // a Data Saída do romaneio vira a data das rotas
+        setTimeout(() => { const barra = document.querySelector('.actions-bar'); if(barra) barra.scrollIntoView({behavior:'smooth', block:'center'}); }, 150);
         const semLoc = orders.slice(antes).filter(o => o.geo === 'failed').length;
-        setImportStatus(`✅ Romaneio ${cab.romaneio||''}: ${n} pedido(s) importado(s)${motoristaId?` para ${titulo(cab.motorista)}`:''}.` + (semLoc ? ` ⚠️ ${semLoc} sem localização no mapa — confira o endereço e use "tentar de novo".` : '') + ' Clique em "Gerar rotas" para ordenar as paradas.');
+        setImportStatus(`✅ Romaneio ${cab.romaneio||''}: ${n} pedido(s) importado(s)${dupAntes ? ` (+${dupAntes} que já estavam no app)` : ''}${motoristaId ? ` para ${(drivers.find(d => d.id === motoristaId) || {}).nome || titulo(cab.motorista)}` : ''}.` + (semLoc ? ` ⚠️ ${semLoc} sem localização no mapa — confira o endereço e use "tentar de novo".` : '') + ' A data do romaneio já foi preenchida. Agora é só "Gerar rotas" e "Enviar para financeiro" (os dois ficam aqui).');
         const resumo = resumoTempos(r, {tClick, tFim:Date.now(), mapaFim, geoFim, geo0, n, uniq:new Set(sel.map(p => geoChave(consultaDe(p).q))).size});
         const box = $('import-status'); if(box) box.textContent += '  ' + resumo.curto;
         registrarLeitura(resumo.longo);
@@ -3771,7 +3854,7 @@ function romaneioParse(pages){
     try{ if(window.pdfjsLib){ const d = await pdfjsLib.getDocument({data: Uint8Array.from(atob('JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCAyMDAgMTAwXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAzOCA+PgpzdHJlYW0KQlQgL0YxIDEyIFRmIDIwIDUwIFRkIChSb21hbmVpbykgVGogRVQKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAowMDAwMDAwMjQxIDAwMDAwIG4gCjAwMDAwMDAzMjkgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgozOTkKJSVFT0YK'), c => c.charCodeAt(0))}).promise; await (await d.getPage(1)).getTextContent(); } }catch(e){}
     try{ fetch('https://nominatim.openstreetmap.org/status.php?format=json', {mode:'no-cors'}).catch(() => {}); }catch(e){}
   }, 1500);
-  window.RomaneioImport = {lerPDF, importarArquivos, iniciar, varrer};
+  window.RomaneioImport = {lerPDF, importarArquivos, iniciar, varrer, acharMotorista};
 })();
 
 </script>
@@ -3785,37 +3868,101 @@ function romaneioParse(pages){
     const m = lbl.match(/^(\d{2}\/\d{2}\/\d{4})/);
     return m ? m[1] : new Date().toLocaleDateString('pt-BR');
   }
-  // mesmo cálculo da coluna "Valor Entrega" do CSV de rotas: paradas + valor extra + coletas
-  function valorDaRota(id){
+  const dataBRiso = iso => { const m = (iso||'').match(/^(\d{4})-(\d{2})-(\d{2})$/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; };
+  // Uma linha do Financeiro POR ROMANEIO: o número do romaneio é o que identifica a carga (a data sozinha não serve,
+  // o mesmo entregador pode ter 2 romaneios no mesmo dia). A data da linha é a "Data Saída" do romaneio.
+  // Extras e coletas somam na carga quando a rota tem uma só; com mais de uma, viram uma linha separada.
+  function linhasDaRota(id){
     const stops = lastRoutes[id] || [];
+    const valores = buildValorEntregaPorParada(stops);
     const rv = computeRouteValue(stops);
-    const paradas = buildValorEntregaPorParada(stops).reduce((s,v) => s + (v||0), 0);
-    const extra = (routeExtras[id] && routeExtras[id].valor) || 0;
-    const col = coletas.filter(c => c.motoristaId === id).reduce((s,c) => s + (c.valTotal||0), 0);
-    return {total: paradas + extra + col, paradas: stops.length, semPreco: rv.hasUnknown};
+    const grupos = new Map();
+    stops.forEach((o, i) => {
+      const rom = String(o.romaneio || '').trim();
+      if(!grupos.has(rom)) grupos.set(rom, {romaneio: rom, valor: 0, paradas: 0, data: ''});
+      const g = grupos.get(rom); g.valor += (valores[i] || 0); g.paradas++;
+      if(!g.data) g.data = dataBRiso(o.romaneioData);
+    });
+    const extra = ((routeExtras[id] && routeExtras[id].valor) || 0) + coletas.filter(c => c.motoristaId === id).reduce((s,c) => s + (c.valTotal||0), 0);
+    const lista = Array.from(grupos.values());
+    if(extra){
+      if(lista.length === 1) lista[0].valor += extra;
+      else lista.push({romaneio:'', extras:true, valor:extra, paradas:0, data:''});
+    }
+    lista.forEach(g => { if(!g.data) g.data = dataRota(); });
+    return {lista, semPreco: rv.hasUnknown};
   }
+  // mesma linha = mesmo entregador + mesmo nº de romaneio (sem nº: mesma data)
+  function mesmaLinha(r, key, g){
+    if(r.entregadorKey !== key) return false;
+    if(g.extras) return !!r.extras && r.data === g.data;
+    if(g.romaneio) return String(r.romaneio || '') === g.romaneio && !r.extras;
+    return !r.romaneio && !r.extras && r.data === g.data;
+  }
+  // Depois de enviar, limpa pedidos, coletas e rotas da tela (entregadores, local de partida e Financeiro ficam).
+  // Guarda uma cópia antes, para dar para desfazer (ex.: precisou reimprimir as rotas).
+  async function limparTelaDepoisDoEnvio(){
+    const snap = {orders, coletas, lastRoutes, routeMetrics, routeExtras, routesGeneratedAt, em: new Date().toISOString()};
+    try{ await window.storage.set('snapshotAntesDeLimpar', JSON.stringify(snap)); }catch(e){ console.warn(e); }
+    orders = []; coletas = []; lastRoutes = {}; routeMetrics = {}; routeExtras = {}; routesStale = false; routesGeneratedAt = null;
+    renderStaleBanner(); cancelEditOrder();
+    await saveOrders(); await saveColetas(); await saveRoutes(); await saveRouteMetrics(); await saveRouteExtras(); await saveRoutesGeneratedAt();
+    renderAll();
+    document.getElementById('routes').innerHTML = ''; document.getElementById('warnings').innerHTML = '';
+    const di = document.getElementById('romaneio-date'); if(di){ di.value = ''; initRomaneioDateInput(); }
+  }
+  async function desfazerLimpeza(){
+    let snap = null;
+    try{ const r = await window.storage.get('snapshotAntesDeLimpar'); snap = r ? JSON.parse(r.value) : null; }catch(e){}
+    if(!snap){ alert('Não há nenhuma limpeza para desfazer.'); return; }
+    if((orders.length || coletas.length) && !confirm('A tela já tem pedidos novos. Restaurar a limpeza anterior vai SUBSTITUIR o que está na tela. Continuar?')) return;
+    orders = snap.orders || []; coletas = snap.coletas || []; lastRoutes = snap.lastRoutes || {}; routeMetrics = snap.routeMetrics || {};
+    routeExtras = snap.routeExtras || {}; routesGeneratedAt = snap.routesGeneratedAt || null; routesStale = false;
+    await saveOrders(); await saveColetas(); await saveRoutes(); await saveRouteMetrics(); await saveRouteExtras(); await saveRoutesGeneratedAt();
+    const di = document.getElementById('romaneio-date');
+    if(di && routesGeneratedAt){ const d = new Date(routesGeneratedAt); di.value = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+    renderAll(); renderRoutesBox(); renderStaleBanner();
+    try{ await window.storage.delete('snapshotAntesDeLimpar'); }catch(e){}
+    document.getElementById('import-status').textContent = '↩️ Limpeza desfeita: pedidos, coletas e rotas voltaram para a tela.';
+  }
+  window.desfazerLimpeza = desfazerLimpeza;
   async function enviarParaFinanceiro(){
     const ids = Object.keys(lastRoutes).filter(id => lastRoutes[id].length > 0 && drivers.some(d => d.id === id));
     if(!ids.length){ alert('Gere as rotas primeiro (botão "Gerar rotas"). Só rotas geradas podem ir para o Financeiro.'); return; }
-    const data = dataRota();
-    const itens = ids.map(id => { const d = drivers.find(x => x.id === id); return {d, key: normEntregadorKey(d.nome), ...valorDaRota(id)}; });
-    const jaExiste = it => financeiroRotas.some(r => r.entregadorKey === it.key && r.data === data);
-    let msg = `Enviar para o Financeiro (data ${data}):\n\n` + itens.map(it => `• ${toTitleCase(it.d.nome)}: ${brl(it.total)} (${it.paradas} parada(s))${jaExiste(it) ? '  ← já enviado nesta data, será substituído' : ''}${it.semPreco ? '  ⚠ tem cidade sem preço' : ''}`).join('\n');
-    msg += `\n\nTotal: ${brl(itens.reduce((s,i) => s + i.total, 0))}`;
+    const itens = [];
+    ids.forEach(id => {
+      const d = drivers.find(x => x.id === id), {lista, semPreco} = linhasDaRota(id);
+      lista.forEach(g => itens.push({d, key: normEntregadorKey(d.nome), g, semPreco}));
+    });
+    const jaExiste = it => financeiroRotas.some(r => mesmaLinha(r, it.key, it.g));
+    const rotulo = g => g.extras ? 'extras/coletas' : (g.romaneio ? 'romaneio ' + g.romaneio : 'sem nº de romaneio');
+    let msg = 'Enviar para o Financeiro:\n\n' + itens.map(it => `• ${toTitleCase(it.d.nome)} — ${rotulo(it.g)} (${it.g.data}): ${brl(it.g.valor)}${it.g.paradas ? ' · ' + it.g.paradas + ' parada(s)' : ''}${jaExiste(it) ? '  ← já enviado, será atualizado' : ''}${it.semPreco ? '  ⚠ cidade sem preço' : ''}`).join('\n');
+    msg += `\n\nTotal: ${brl(itens.reduce((s,i) => s + i.g.valor, 0))}\n\nOutros romaneios do mesmo entregador e do mesmo dia já enviados continuam como estão.\n\nDepois de enviar, a tela é LIMPA sozinha (pedidos, coletas e rotas). Os entregadores ficam. Se precisar, dá para desfazer. Já imprimiu as rotas?`;
     if(itens.some(i => i.semPreco)) msg += '\n\n⚠ Alguma rota tem pedido sem preço cadastrado; o valor pode estar incompleto.';
     if(!confirm(msg)) return;
+    // se o entregador deixou de ter linha separada de extras (voltou a ter 1 carga só), tira a linha antiga: senão contaria 2x
+    new Set(itens.map(i => i.key)).forEach(key => {
+      const meus = itens.filter(i => i.key === key);
+      if(meus.some(i => i.g.extras)) return;
+      const datas = new Set([...meus.map(i => i.g.data), dataRota()]);   // a linha de extras usa a data da geração
+      financeiroRotas = financeiroRotas.filter(r => !(r.entregadorKey === key && r.extras && datas.has(r.data)));
+    });
     itens.forEach(it => {
-      financeiroRotas = financeiroRotas.filter(r => !(r.entregadorKey === it.key && r.data === data));
-      financeiroRotas.push({id: uid(), entregador: toTitleCase(it.d.nome), entregadorKey: it.key, data, valor: it.total, arquivo: 'Enviado do Roteiriza'});
+      financeiroRotas = financeiroRotas.filter(r => !mesmaLinha(r, it.key, it.g));
+      financeiroRotas.push({id: uid(), entregador: toTitleCase(it.d.nome), entregadorKey: it.key, data: it.g.data, romaneio: it.g.romaneio, extras: it.g.extras ? true : undefined, valor: it.g.valor, arquivo: 'Enviado do Roteiriza'});
     });
     await saveFinanceiroRotas();
     renderFinanceiro();
+    await limparTelaDepoisDoEnvio();
     const box = document.getElementById('import-status');
-    box.innerHTML = `✅ ${itens.length} rota(s) enviada(s) para o Financeiro. <a href="#" id="fin-ir" style="color:var(--teal); font-weight:700;">Abrir Financeiro</a>`;
+    box.innerHTML = `✅ ${itens.length} lançamento(s) enviado(s) para o Financeiro e a tela foi limpa. <a href="#" id="fin-ir" style="color:var(--teal); font-weight:700;">Abrir Financeiro</a> · <a href="#" id="fin-undo" style="color:var(--muted);">desfazer limpeza</a>`;
     document.getElementById('fin-ir').onclick = e => { e.preventDefault(); setPage('financeiro'); };
+    document.getElementById('fin-undo').onclick = e => { e.preventDefault(); desfazerLimpeza(); };
   }
   document.getElementById('btn-send-financeiro').addEventListener('click', enviarParaFinanceiro);
   window.enviarParaFinanceiro = enviarParaFinanceiro;
+  const rodape = document.querySelector('footer');
+  if(rodape){ rodape.insertAdjacentHTML('beforeend', ' · <a href="#" id="undo-limpeza" style="color:inherit">desfazer última limpeza</a>'); document.getElementById('undo-limpeza').onclick = e => { e.preventDefault(); desfazerLimpeza(); }; }
 })();
 
 </script>
@@ -3905,6 +4052,8 @@ function romaneioParse(pages){
     ov.querySelector('#imp-msg').textContent = s.msg || '';
     ov.querySelector('#imp-instalar').disabled = s.ocupado || s.instalada === true;
     ov.querySelector('#imp-remover').disabled = s.ocupado || s.instalada !== true;
+    ov.querySelector('#imp-testar').disabled = s.ocupado || s.instalada !== true;
+    ov.querySelector('#imp-reparar').disabled = s.ocupado || !s.exe;
     if(!s.exe) ov.querySelector('#imp-msg').textContent = 'A impressora só pode ser instalada pelo programa .exe.';
   }
   function abrir(){
@@ -3912,10 +4061,12 @@ function romaneioParse(pages){
     ov = document.createElement('div'); ov.className = 'rom-overlay';
     ov.innerHTML = `<div class="rom-modal" style="max-width:520px">
       <h2>🖨️ Impressora e programa</h2>
-      <div class="rom-box" style="margin-top:10px"><b id="imp-estado">...</b><div class="rom-sub" id="imp-msg" style="margin-top:4px"></div></div>
+      <div class="rom-box" style="margin-top:10px"><b id="imp-estado">...</b><div class="rom-sub" id="imp-msg" style="margin-top:4px; white-space:pre-wrap"></div></div>
       <p class="rom-sub">Depois de instalada (uma vez por computador), imprima o romaneio do sistema na impressora <b>Romaneio Freedom</b>: o Roteiriza abre sozinho na tela de conferência.</p>
       <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px">
         <button class="btn btn-primary" id="imp-instalar">Instalar impressora</button>
+        <button class="btn btn-ghost" id="imp-testar">Testar impressora</button>
+        <button class="btn btn-ghost" id="imp-reparar">Reparar impressão</button>
         <button class="btn btn-ghost" id="imp-remover">Remover impressora</button>
         <button class="btn btn-ghost" id="imp-pasta">Abrir pasta dos dados</button>
         <button class="btn btn-ghost" id="imp-sair">Encerrar o programa</button>
@@ -3924,6 +4075,8 @@ function romaneioParse(pages){
     document.body.appendChild(ov);
     ov.querySelector('#imp-instalar').onclick = async () => { await post('/api/impressora/instalar'); pintar(); };
     ov.querySelector('#imp-remover').onclick = async () => { if(confirm('Remover a impressora "Romaneio Freedom"?')){ await post('/api/impressora/remover'); pintar(); } };
+    ov.querySelector('#imp-testar').onclick = async () => { await post('/api/impressora/testar'); pintar(); };
+    ov.querySelector('#imp-reparar').onclick = async () => { if(confirm('Limpar a fila de impressão do Windows? Documentos que estiverem esperando em QUALQUER impressora serão cancelados.')){ await post('/api/impressora/reparar'); pintar(); } };
     ov.querySelector('#imp-pasta').onclick = () => post('/api/abrir-pasta');
     ov.querySelector('#imp-sair').onclick = async () => { if(confirm('Encerrar o Roteiriza? (Imprimir um romaneio abre ele de novo sozinho.)')){ await post('/api/sair'); } };
     ov.querySelector('#imp-fechar').onclick = () => { clearInterval(timer); ov.remove(); ov = null; };
