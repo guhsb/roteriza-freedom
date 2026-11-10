@@ -86,7 +86,10 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    A impressão do sistema volta para este computador por uma impressora "redirecionada": o nome termina com
    "(redirecionada NNNN)" (o número é o da sessão e muda a cada conexão). Imprima SEMPRE nessa. Outra cópia da
    "Romaneio Freedom" com nome diferente fica presa no servidor e a tarefa trava em "Spooling" na sua fila.
-   - Ao conectar: Mostrar Opções > Recursos Locais > Impressoras > Mais > marque só a "Romaneio Freedom".
+   - Ao conectar: Mostrar Opções > Recursos Locais > deixe "Impressoras" marcado (é uma caixa só; a janela "Mais..." NÃO lista impressoras).
+   - Em muitos servidores só a impressora PADRÃO do seu Windows vira "(redirecionada)". Deixe a "Romaneio Freedom" como padrão
+     (Configurações > Impressoras e scanners > Romaneio Freedom > Definir como padrão; desligue "Permitir que o Windows gerencie
+     minha impressora padrão") e reconecte com Sair/logoff. Isso é uma hipótese a testar, não confirmada.
    - Ao terminar: use "Sair" (logoff) em vez de só fechar a janela, para não sobrar impressora de sessão antiga.
    - Se a impressora redirecionada não aparecer na lista do sistema, desconecte e conecte de novo com Impressoras ligado.
 
@@ -126,19 +129,3 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    - PDF com texto continua sendo lido na hora, sem leitura de imagem.
    - Esta função deixa o programa maior (mais ~250 MB) por causa do leitor de imagem. Só existe no .exe.
 
-16) IMPRESSÃO POR IP (o programa vira uma "impressora de rede")
-   Painel "Como o romaneio chega · programa" > "Impressão por IP (rede)". O sistema manda a impressão para um IP e uma
-   porta (padrão 9100), sem arquivo, sem pasta e sem impressora redirecionada. O programa junta o que chegou, acha o PDF
-   (mesmo embrulhado em comandos da impressora) e abre a conferência, como nos outros jeitos.
-   A) NESTE PC: marque "Receber impressão por IP" e clique "Instalar impressora por IP neste PC" (pede administrador).
-      Cria a "Romaneio Freedom (IP)", que manda para 127.0.0.1. Imprima nela: aparece "Última impressão recebida".
-   B) O SISTEMA NO SERVIDOR IMPRIMINDO DIRETO NESTE PC (resolve o problema da impressora redirecionada):
-      1. Aqui: marque "Receber impressão por IP" E "Aceitar também de OUTROS computadores" e clique "Liberar no firewall".
-      2. Este PC precisa de IP fixo (peça reserva de DHCP). O IP aparece no painel.
-      3. No servidor (quem cuida do sistema): Adicionar impressora > TCP/IP > IP deste PC, porta 9100 (RAW) >
-         driver "Microsoft Print To PDF" > nome "Romaneio Freedom (rede)". No sistema, imprimir nessa impressora.
-   CONFERINDO: se a impressão chegar mas não abrir a conferência, o painel mostra o formato recebido ("não é PDF: XPS/
-   PostScript/PCL") e guarda em dados\recebidos_rede. Nesse caso o driver da impressora não é o "Microsoft Print To PDF".
-   O arquivo dados\rede.log guarda cada impressão recebida (de onde, tamanho e tipo): mande para a gente se algo falhar.
-   SEGURANÇA: "Aceitar de OUTROS computadores" abre a porta para a rede; use só em rede interna confiável. O programa só
-   aceita PDF (até 80 MB) e a regra do firewall vale só para redes de domínio/privadas e só para este programa.

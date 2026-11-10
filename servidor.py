@@ -120,45 +120,6 @@ def em_uso():
         return sk.connect_ex(("127.0.0.1", PORTA)) == 0
 
 
-PORTA_REDE = 9100
-
-
-def ips_locais():
-    """Endereços IP deste computador na rede (para informar ao servidor onde imprimir)."""
-    achados = []
-    try:                                              # o endereço que o Windows usaria para sair (não envia nada)
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
-            sk.connect(("10.255.255.255", 1))
-            achados.append(sk.getsockname()[0])
-    except OSError:
-        pass
-    try:
-        achados += socket.gethostbyname_ex(socket.gethostname())[2]
-    except OSError:
-        pass
-    vistos = []
-    for ip in achados:
-        if ip and not ip.startswith(("127.", "169.254.")) and ip not in vistos:
-            vistos.append(ip)
-    return vistos
-
-
-def extrai_pdf(dados):
-    """Procura o PDF no que a impressora mandou (às vezes vem embrulhado em comandos PJL). Devolve (tipo, bytes|None)."""
-    i = dados.find(b"%PDF-")
-    if i >= 0:
-        fim = dados.rfind(b"%%EOF")
-        fim = fim + 5 if fim > i else len(dados)
-        return "pdf", dados[i:fim] + b"\n"
-    if dados[:4] == b"PK\x03\x04":
-        return "XPS (o driver mandou XPS, não PDF)", None
-    if dados.lstrip(b"\x1b%-12345X@PJL \r\n")[:3] == b"%!P" or b"%!PS" in dados[:4096]:
-        return "PostScript (o driver mandou PostScript, não PDF)", None
-    if dados[:2] == b"\x1bE" or b"\x1b&l" in dados[:200]:
-        return "PCL (o driver mandou PCL, não PDF)", None
-    return "formato desconhecido", None
-
-
 def pedir_frente():
     """Há outro Roteiriza aberto: pede para ele trazer a janela para a frente."""
     import urllib.request
@@ -184,7 +145,6 @@ class Servidor:
         self.abrir_janela = None      # função que abre a janela do programa (definida pelo app.py)
         self.janela = None            # processo da janela (Edge/Chrome em modo aplicativo)
         self.total_capturados = 0     # quantos PDFs já chegaram da impressora (usado no teste)
-        self.rede = {"sock": None, "erro": "", "ultimo": ""}   # receptor de impressão por IP (porta 9100)
         self.pedido_sair = False      # a página pediu para encerrar o programa
         self.sair_cb = None           # fecha a janela do programa
         self.trazer = None            # traz a janela do programa para a frente
@@ -222,11 +182,8 @@ class Servidor:
         def alvo():
             import impressora_virtual
             try:
-                porta = self._cfg_rede()["porta"]
                 r = {"instalar": impressora_virtual.instalar, "remover": impressora_virtual.remover,
-                     "reparar": impressora_virtual.reparar,
-                     "instalar-ip": lambda: impressora_virtual.instalar_ip(porta),
-                     "firewall": lambda: impressora_virtual.liberar_firewall(porta)}[qual]()
+                     "reparar": impressora_virtual.reparar}[qual]()
             except Exception as e:                      # noqa: BLE001
                 r = f"ERRO: {e}"
             ok = impressora_virtual.impressora_instalada()
@@ -237,10 +194,6 @@ class Servidor:
                     self.imp["msg"] = "Não deu certo: " + r.split("ERRO:")[-1].strip()
                 elif qual == "instalar":
                     self.imp["msg"] = 'Impressora instalada! Clique em "Testar impressora" e depois imprima o romaneio na "Romaneio Freedom".'
-                elif qual == "instalar-ip":
-                    self.imp["msg"] = 'Impressora "Romaneio Freedom (IP)" criada neste PC. Ligue "Receber impressão por IP" e imprima nela.'
-                elif qual == "firewall":
-                    self.imp["msg"] = "Porta liberada no firewall (redes de domínio e privadas)."
                 elif qual == "reparar":
                     self.imp["msg"] = 'Fila de impressão limpa. Clique em "Testar impressora" para conferir.'
                 else:
@@ -319,131 +272,6 @@ class Servidor:
             except OSError:
                 pass
         return achados
-
-    # ---------- impressão por IP: o programa vira uma "impressora de rede" ----------
-    def _cfg_rede(self):
-        c = ler_config().get("rede", {})
-        return {"ativa": bool(c.get("ativa")), "aberta": bool(c.get("aberta")), "porta": int(c.get("porta") or PORTA_REDE)}
-
-    def estado_rede(self):
-        c = self._cfg_rede()
-        return {**c, "ouvindo": self.rede["sock"] is not None, "ips": ips_locais(), "erro": self.rede["erro"], "ultimo": self.rede["ultimo"]}
-
-    def configurar_rede(self, ativa, aberta):
-        cfg = ler_config()
-        cfg["rede"] = {**self._cfg_rede(), "ativa": bool(ativa), "aberta": bool(aberta)}
-        gravar_config(cfg)
-        self._rede_aplicar()
-        return self.estado_rede()
-
-    def _rede_parar(self):
-        sk, self.rede["sock"] = self.rede["sock"], None
-        if sk:
-            for acao in (lambda: sk.shutdown(socket.SHUT_RDWR), sk.close):    # acorda o accept() e libera a porta
-                try:
-                    acao()
-                except OSError:
-                    pass
-
-    def _rede_aplicar(self):
-        self._rede_parar()
-        self.rede["erro"] = ""
-        c = self._cfg_rede()
-        if not c["ativa"]:
-            return
-        erro = None
-        for _ in range(8):                           # a porta antiga pode levar um instante para soltar
-            try:
-                sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                sk.bind(("0.0.0.0" if c["aberta"] else "127.0.0.1", c["porta"]))
-                sk.listen(8)
-                sk.settimeout(1.0)
-                erro = None
-                break
-            except OSError as e:
-                erro = e
-                try:
-                    sk.close()
-                except OSError:
-                    pass
-                time.sleep(0.4)
-        if erro is not None:
-            self.rede["erro"] = f"Não consegui abrir a porta {c['porta']}: {erro}. Outro programa pode estar usando."
-            return
-        self.rede["sock"] = sk
-        threading.Thread(target=self._rede_loop, args=(sk,), daemon=True).start()
-
-    def _rede_loop(self, sk):
-        while self.rede["sock"] is sk and not self._parar.is_set():
-            try:
-                conn, addr = sk.accept()
-            except socket.timeout:
-                continue
-            except OSError:
-                return
-            threading.Thread(target=self._rede_atende, args=(conn, addr), daemon=True).start()
-
-    def _rede_log(self, texto):
-        try:
-            with open(os.path.join(pasta_dados(), "rede.log"), "a", encoding="utf-8") as f:
-                f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  " + texto + "\n")
-        except OSError:
-            pass
-
-    def _rede_atende(self, conn, addr):
-        """Recebe a impressão até a conexão fechar (ou ficar parada), acha o PDF e entrega à pasta de entrada."""
-        conn.settimeout(5)
-        dados, ultimo = bytearray(), time.time()
-        try:
-            while True:
-                try:
-                    pedaco = conn.recv(65536)
-                except socket.timeout:
-                    if time.time() - ultimo > 8:
-                        break
-                    continue
-                if not pedaco:
-                    break
-                dados += pedaco
-                ultimo = time.time()
-                if len(dados) > 80_000_000:
-                    break
-        except OSError:
-            pass
-        finally:
-            try:
-                conn.close()
-            except OSError:
-                pass
-        tipo, pdf = extrai_pdf(bytes(dados))
-        origem = f"{addr[0]}:{addr[1]}"
-        if not dados:
-            return                                    # conexão vazia (teste de porta de outro programa)
-        if pdf:
-            nome = time.strftime("rede_%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:4]}.pdf"
-            final = os.path.join(pasta_entrada(), nome)
-            tmp = final + ".tmp"
-            try:
-                with open(tmp, "wb") as f:
-                    f.write(pdf)
-                os.replace(tmp, final)                # só vira .pdf quando está completo
-            except OSError as e:
-                self.rede["ultimo"] = f"Recebi {len(dados)} bytes de {origem}, mas não consegui gravar: {e}"
-                self._rede_log(self.rede["ultimo"])
-                return
-            self.rede["ultimo"] = f"{time.strftime('%H:%M:%S')} · PDF recebido de {origem} ({len(pdf) // 1024} KB)"
-        else:
-            pasta = _sub("recebidos_rede")
-            arq = os.path.join(pasta, time.strftime("rede_%Y%m%d_%H%M%S") + ".bin")
-            try:
-                with open(arq, "wb") as f:
-                    f.write(bytes(dados))
-            except OSError:
-                pass
-            self.rede["ultimo"] = (f"{time.strftime('%H:%M:%S')} · Recebi {len(dados) // 1024} KB de {origem}, mas não é PDF: {tipo}. "
-                                   f"Escolha o driver \"Microsoft Print To PDF\" na impressora. (guardado em dados\\recebidos_rede)")
-        self._rede_log(f"{origem} · {len(dados)} bytes · {tipo} · {self.rede['ultimo']}")
 
     # ---------- pastas do ERP (onde o sistema salva os PDFs): lê os NOVOS, não apaga nada ----------
     def adicionar_pasta_erp(self, caminho):
@@ -625,7 +453,6 @@ class Servidor:
                                             "pastas_erp": [p["caminho"] for p in srv.pastas_erp],
                                             "inicio_automatico": impressora_virtual.inicio_automatico_ativo(),
                                             "ocr": __import__("ocr_romaneio").disponivel(),
-                                            "rede": srv.estado_rede(),
                                             "exe": impressora_virtual.eh_exe()})
                 if u.path == "/api/impressora":
                     import impressora_virtual
@@ -678,14 +505,9 @@ class Servidor:
                 if not self._escrita_ok():
                     return self._resp(403, {"erro": "negado"})
                 u = urlparse(self.path)
-                if u.path in ("/api/impressora/instalar", "/api/impressora/remover", "/api/impressora/reparar",
-                              "/api/impressora/instalar-ip", "/api/impressora/firewall"):
+                if u.path in ("/api/impressora/instalar", "/api/impressora/remover", "/api/impressora/reparar"):
                     srv.acao_impressora(u.path.rsplit("/", 1)[-1])
                     return self._resp(200, {"ok": True})
-                if u.path == "/api/rede":
-                    q = parse_qs(u.query)
-                    estado = srv.configurar_rede((q.get("ativa") or ["0"])[0] == "1", (q.get("aberta") or ["0"])[0] == "1")
-                    return self._resp(200, {"ok": not estado["erro"], **estado})
                 if u.path in ("/api/pasta-erp", "/api/pasta-erp/remover"):
                     n = min(int(self.headers.get("Content-Length") or 0), 2000)
                     caminho = self.rfile.read(n).decode("utf-8", "replace")
@@ -781,7 +603,6 @@ class Servidor:
         self.httpd.daemon_threads = True
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         threading.Thread(target=self._vigia, daemon=True).start()
-        self._rede_aplicar()
         try:
             import ocr_romaneio
             if ocr_romaneio.disponivel():
@@ -791,7 +612,6 @@ class Servidor:
 
     def parar(self):
         self._parar.set()
-        self._rede_parar()
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()        # libera a porta

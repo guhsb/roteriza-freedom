@@ -19,8 +19,6 @@ import time
 import servidor
 
 NOME = "Romaneio Freedom"
-NOME_IP = "Romaneio Freedom (IP)"
-REGRA_FW = "Roteiriza Freedom - impressora por IP"
 TAREFA = "RoteirizaFreedom-Romaneio"
 SEM_JANELA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -192,44 +190,6 @@ try {{
 """
 
 
-def script_instalar_ip(porta):
-    """Impressora local "Romaneio Freedom (IP)": manda a impressão para 127.0.0.1:<porta>, onde o Roteiriza escuta."""
-    return f"""$ErrorActionPreference = 'Stop'
-$log = '{_ps(log_instalacao())}'
-function Log($m) {{ Add-Content -LiteralPath $log -Value ((Get-Date -Format 's') + ' ' + $m) -Encoding UTF8 }}
-Set-Content -LiteralPath $log -Value '' -Encoding UTF8
-try {{
-  $nome = '{_ps(NOME_IP)}'
-  $porta = 'IP_127.0.0.1_{int(porta)}'
-  if (-not (Get-PrinterPort -Name $porta -ErrorAction SilentlyContinue)) {{ Add-PrinterPort -Name $porta -PrinterHostAddress '127.0.0.1' -PortNumber {int(porta)}; Log 'porta IP criada' }}
-  if (-not (Get-Printer -Name $nome -ErrorAction SilentlyContinue)) {{
-    Add-Printer -Name $nome -DriverName 'Microsoft Print To PDF' -PortName $porta
-    Log 'impressora por IP criada'
-  }} else {{ Log 'impressora por IP ja existia' }}
-  Log 'OK'
-}} catch {{
-  Log ('ERRO: ' + $_.Exception.Message)
-}}
-"""
-
-
-def script_firewall(exe, porta):
-    """Libera a porta no firewall do Windows (só redes de domínio/privadas), para o servidor conseguir imprimir aqui."""
-    return f"""$ErrorActionPreference = 'Stop'
-$log = '{_ps(log_instalacao())}'
-function Log($m) {{ Add-Content -LiteralPath $log -Value ((Get-Date -Format 's') + ' ' + $m) -Encoding UTF8 }}
-Set-Content -LiteralPath $log -Value '' -Encoding UTF8
-try {{
-  Get-NetFirewallRule -DisplayName '{_ps(REGRA_FW)}' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-  New-NetFirewallRule -DisplayName '{_ps(REGRA_FW)}' -Direction Inbound -Protocol TCP -LocalPort {int(porta)} -Action Allow -Profile Domain,Private -Program '{_ps(exe)}' | Out-Null
-  Log 'regra de firewall criada'
-  Log 'OK'
-}} catch {{
-  Log ('ERRO: ' + $_.Exception.Message)
-}}
-"""
-
-
 def script_remover():
     return f"""$ErrorActionPreference = 'SilentlyContinue'
 $log = '{_ps(log_instalacao())}'
@@ -238,9 +198,6 @@ Set-Content -LiteralPath $log -Value '' -Encoding UTF8
 Unregister-ScheduledTask -TaskName '{TAREFA}' -Confirm:$false
 Remove-Printer -Name '{_ps(NOME)}'
 Remove-PrinterPort -Name '{_ps(servidor.porta_arquivo())}'
-Remove-Printer -Name '{_ps(NOME_IP)}'
-Get-PrinterPort | Where-Object {{ $_.Name -like 'IP_127.0.0.1_*' }} | Remove-PrinterPort
-Get-NetFirewallRule -DisplayName '{_ps(REGRA_FW)}' | Remove-NetFirewallRule
 Log 'removido'
 Log 'OK'
 """
@@ -303,20 +260,6 @@ def remover():
     return executa_como_admin(script_remover())
 
 
-def instalar_ip(porta=9100):
-    if not eh_exe():
-        return "ERRO: só pelo programa .exe (não pelo código-fonte)."
-    return executa_como_admin(script_instalar_ip(porta))
-
-
-def liberar_firewall(porta=9100):
-    if not eh_exe():
-        return "ERRO: só pelo programa .exe (não pelo código-fonte)."
-    return executa_como_admin(script_firewall(sys.executable, porta))
-
-
-def reparar():
-    return executa_como_admin(script_reparar())
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

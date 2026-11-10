@@ -4261,16 +4261,7 @@ function romaneioParse(pages){
     l.innerHTML = (c.pastas_erp || []).map(p => `<span style="display:block;">📁 ${escHtml(p)} · <a href="#" data-rm="${escHtml(p)}">remover</a></span>`).join('');
     l.querySelectorAll('[data-rm]').forEach(a => a.onclick = async e => { e.preventDefault(); await postTexto('/api/pasta-erp/remover', a.dataset.rm); pintarConfig(); });
     const ck = ov.querySelector('#cfg-inicio'); ck.checked = c.inicio_automatico === true; ck.disabled = !c.exe;
-    const rd = c.rede || {};
-    if(document.activeElement !== ov.querySelector('#rede-ativa') && document.activeElement !== ov.querySelector('#rede-aberta')){
-      ov.querySelector('#rede-ativa').checked = !!rd.ativa; ov.querySelector('#rede-aberta').checked = !!rd.aberta;
-    }
-    ov.querySelector('#rede-aberta').disabled = !rd.ativa;
-    ov.querySelector('#rede-porta').textContent = rd.porta || 9100;
-    const ips = (rd.ips || []).join(', ') || '(não achei)';
-    ov.querySelector('#rede-info').innerHTML = (rd.ouvindo ? '🟢 Ouvindo' + (rd.aberta ? ' em toda a rede' : ' só neste PC (127.0.0.1)') : (rd.ativa ? '🔴 Não está ouvindo' : '⚪ Desligado')) + ` · IP deste PC: <b>${escHtml(ips)}</b>` + (rd.ultimo ? `<br>Última impressão recebida: ${escHtml(rd.ultimo)}` : '') + (rd.erro ? `<br><span style="color:var(--red)">${escHtml(rd.erro)}</span>` : '');
-    ov.querySelector('#rede-ip-ex').textContent = (rd.ips && rd.ips[0]) || 'IP deste PC';
-    ov.querySelector('#rede-ip-inst').disabled = !c.exe; ov.querySelector('#rede-fw').disabled = !c.exe;
+
   }
   function abrir(){
     if(ov) return;
@@ -4292,24 +4283,10 @@ function romaneioParse(pages){
         </div>
         <label style="margin-top:8px;"><input type="checkbox" id="cfg-inicio"> Abrir junto com o Windows (minimizado), para já estar pronto quando o romaneio chegar</label>
       </div>
-      <div class="rom-box" style="margin-top:10px">
-        <b>Impressão por IP (rede)</b>
-        <div class="rom-sub" style="margin-top:6px; line-height:1.55;">O programa vira uma "impressora de rede": o sistema manda a impressão para um IP e uma porta, sem arquivo, sem pasta e sem impressora redirecionada.</div>
-        <label style="margin-top:6px;"><input type="checkbox" id="rede-ativa"> Receber impressão por IP (porta <span id="rede-porta">9100</span>)</label>
-        <label><input type="checkbox" id="rede-aberta"> Aceitar também de OUTROS computadores (para o sistema, no servidor, imprimir direto aqui)</label>
-        <div class="rom-sub" id="rede-info" style="margin-top:4px; line-height:1.55;"></div>
-        <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px">
-          <button class="btn btn-ghost" id="rede-ip-inst">Instalar impressora por IP neste PC</button>
-          <button class="btn btn-ghost" id="rede-fw">Liberar no firewall</button>
-        </div>
-        <details style="margin-top:6px"><summary class="rom-sub" style="cursor:pointer">Como configurar no servidor (para quem cuida do sistema)</summary>
-          <div class="rom-sub" style="line-height:1.55; margin-top:4px">No servidor: Adicionar impressora &gt; Impressora TCP/IP &gt; endereço <b id="rede-ip-ex">IP deste PC</b>, porta <b>9100</b> (RAW) &gt; driver <b>Microsoft Print To PDF</b> &gt; nome "Romaneio Freedom (rede)". No sistema, imprima o Controle de Entrega nessa impressora. Este PC precisa ter IP fixo, com "Aceitar também de outros computadores" ligado e a porta liberada no firewall. Se a impressão chegar mas não for PDF, o aviso acima diz o formato recebido.</div>
-        </details>
-      </div>
       <h3 style="margin:14px 0 0; font-size:15px;">Impressora "Romaneio Freedom"</h3>
       <div class="rom-box" style="margin-top:10px"><b id="imp-estado">...</b><div class="rom-sub" id="imp-msg" style="margin-top:4px; white-space:pre-wrap"></div></div>
       <p class="rom-sub">Depois de instalada (uma vez por computador), imprima o romaneio do sistema na impressora <b>Romaneio Freedom</b>: o Roteiriza abre sozinho na tela de conferência.</p>
-      <p class="rom-sub" style="background:#FFF4DC; border:1px solid #EE9B00; border-radius:8px; padding:8px 10px;"><b>Sistema em Área de Trabalho Remota?</b> Imprima só na impressora que tem <b>"(redirecionada ...)"</b> no nome: é a que volta para este computador. Cópias com outro nome ficam presas no servidor ("Spooling"). Dica: ao conectar, em Recursos Locais &gt; Impressoras &gt; Mais, marque só a "Romaneio Freedom", e saia com <b>Sair</b> (logoff) em vez de só fechar a janela.</p>
+      <p class="rom-sub" style="background:#FFF4DC; border:1px solid #EE9B00; border-radius:8px; padding:8px 10px;"><b>Sistema em Área de Trabalho Remota?</b> Imprima só na impressora que tem <b>"(redirecionada ...)"</b> no nome: é a que volta para este computador. Cópias com outro nome ficam presas no servidor ("Spooling"). Dica: na conexão remota (Mostrar Opções &gt; Recursos Locais), deixe <b>Impressoras</b> marcado. Em muitos servidores só a impressora <b>padrão</b> do seu Windows aparece como "(redirecionada)": deixe a "Romaneio Freedom" como padrão antes de conectar. Saia com <b>Sair</b> (logoff) em vez de só fechar a janela.</p>
       <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:6px">
         <button class="btn btn-primary" id="imp-instalar">Instalar impressora</button>
         <button class="btn btn-ghost" id="imp-testar">Testar impressora</button>
@@ -4341,10 +4318,6 @@ function romaneioParse(pages){
       const r = await post('/api/inicio-automatico?ligar=' + (e.target.checked ? 1 : 0));
       if(!r.ok){ alert(r.erro || 'Não consegui mudar.'); e.target.checked = !e.target.checked; }
     };
-    const aplicarRede = async () => { await post('/api/rede?ativa=' + (ov.querySelector('#rede-ativa').checked ? 1 : 0) + '&aberta=' + (ov.querySelector('#rede-aberta').checked ? 1 : 0)); pintarConfig(); };
-    ov.querySelector('#rede-ativa').onchange = aplicarRede; ov.querySelector('#rede-aberta').onchange = aplicarRede;
-    ov.querySelector('#rede-ip-inst').onclick = async () => { await post('/api/impressora/instalar-ip'); pintar(); };
-    ov.querySelector('#rede-fw').onclick = async () => { await post('/api/impressora/firewall'); pintar(); };
     pintarConfig();
     pintar(); timer = setInterval(() => { pintar(); pintarConfig(); }, 2000);
   }
