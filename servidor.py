@@ -200,6 +200,24 @@ class Servidor:
                     self.imp["msg"] = "Impressora removida."
         threading.Thread(target=alvo, daemon=True).start()
 
+    def observar_impressao(self, segundos=150):
+        """Observa a fila enquanto a pessoa imprime e diz se o servidor parou de enviar no meio."""
+        with self.lock:
+            if self.imp["ocupado"]:
+                return
+            self.imp["ocupado"] = True
+            self.imp["msg"] = f"Observando a fila por {segundos} s... IMPRIMA o Controle de Entrega agora (pode deixar esta janela aberta)."
+
+        def alvo():
+            import impressora_virtual
+            antes = self.total_capturados
+            texto = impressora_virtual.observar_fila(segundos)
+            msg = impressora_virtual.resumo_observacao(texto, self.total_capturados > antes) + " (detalhes em dados\\observacao_impressao.txt)"
+            with self.lock:
+                self.imp["ocupado"] = False
+                self.imp["msg"] = msg
+        threading.Thread(target=alvo, daemon=True).start()
+
     def comparar_impressoras(self):
         """Compara a Romaneio Freedom com a Etiqueta Freedom (que funciona) e mostra o que é diferente."""
         with self.lock:
@@ -522,6 +540,9 @@ class Servidor:
                     erro = impressora_virtual.define_inicio_automatico(ligar)
                     return self._resp(200, {"ok": not erro, "erro": erro,
                                             "inicio_automatico": impressora_virtual.inicio_automatico_ativo()})
+                if u.path == "/api/impressora/observar":
+                    srv.observar_impressao()
+                    return self._resp(200, {"ok": True})
                 if u.path == "/api/impressora/comparar":
                     srv.comparar_impressoras()
                     return self._resp(200, {"ok": True})

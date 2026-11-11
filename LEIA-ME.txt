@@ -129,3 +129,12 @@ ROTEIRIZA FREEDOM  (programa do Windows)
    - PDF com texto continua sendo lido na hora, sem leitura de imagem.
    - Esta função deixa o programa maior (mais ~250 MB) por causa do leitor de imagem. Só existe no .exe.
 
+
+16) A IMPRESSÃO FICA "CARREGANDO" (SPOOLING) PARA SEMPRE: ONDE TRAVA?
+   Rodapé > "impressora e programa" > "Observar a próxima impressão (150 s)". Clique e, em seguida, IMPRIMA o Controle de
+   Entrega no sistema. O programa olha a fila da "Romaneio Freedom" a cada segundo e responde em uma frase:
+   - "PAROU de crescer ... o servidor parou de enviar no meio": o documento começou a chegar (tamanho em KB) e travou antes de
+     terminar. A impressora deste PC não é a causa: o problema está no servidor/WMC ou no caminho até aqui. Mande a linha do
+     tempo (dados\observacao_impressao.txt) para o suporte do WMC.
+   - "terminou" + "o PDF chegou": funcionou.
+   - "Nada apareceu": a impressão não foi feita nessa impressora, ou o servidor nem começou a enviar.

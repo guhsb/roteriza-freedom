@@ -11,6 +11,7 @@ Precisa de permissão de administrador uma única vez (instalação).
 import ctypes
 import getpass
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -147,6 +148,70 @@ def resumo_comparacao(texto):
         return ("As duas impressoras estão configuradas igual (só a porta/pasta é diferente). "
                 "Então a diferença está no documento que o sistema manda ou no caminho dele até aqui.")
     return "Diferenças entre Romaneio e Etiqueta: " + "; ".join(relevantes)
+
+
+SCRIPT_OBSERVAR = r"""$n = 'Romaneio Freedom'
+$ini = Get-Date
+for ($i = 0; $i -lt __SEGUNDOS__; $i++) {
+  $t = [int]((Get-Date) - $ini).TotalSeconds
+  $jobs = @(Get-PrintJob -PrinterName $n -ErrorAction SilentlyContinue)
+  if ($jobs.Count -eq 0) { "t=$t | sem documentos" }
+  foreach ($j in $jobs) { "t=$t | id=$($j.Id) | status=$($j.JobStatus) | bytes=$($j.Size) | paginas=$($j.TotalPages) | dono=$($j.UserName) | doc=$($j.DocumentName)" }
+  Start-Sleep -Seconds 1
+}
+"""
+
+
+def observar_fila(segundos=150):
+    """Olha a fila da Romaneio Freedom a cada segundo e devolve a linha do tempo (para ver se o servidor parou de enviar)."""
+    try:
+        texto = _powershell(SCRIPT_OBSERVAR.replace("__SEGUNDOS__", str(int(segundos))), segundos + 40)
+    except Exception as e:                           # noqa: BLE001
+        return f"ERRO ao observar: {e}"
+    try:
+        with open(os.path.join(servidor.pasta_dados(), "observacao_impressao.txt"), "w", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + "  (linha do tempo da fila da Romaneio Freedom, 1 linha por segundo)\n" + texto + "\n")
+    except OSError:
+        pass
+    return texto
+
+
+def resumo_observacao(texto, chegou_pdf):
+    """Em uma frase: o documento chegou inteiro, parou no meio (servidor parou de enviar) ou nem apareceu."""
+    if "ERRO ao observar" in (texto or ""):
+        return texto.strip().splitlines()[0]
+    docs, fim = {}, 0
+    for ln in (texto or "").splitlines():
+        m = re.match(r"t=(\d+) \| id=(\d+) \| status=(.*?) \| bytes=(\d+)", ln)
+        if m:
+            t = int(m.group(1))
+            fim = max(fim, t)
+            docs.setdefault(m.group(2), []).append((t, m.group(3).strip(), int(m.group(4))))
+        else:
+            m2 = re.match(r"t=(\d+) \| sem documentos", ln)
+            if m2:
+                fim = max(fim, int(m2.group(1)))
+    if not docs:
+        return ("Nada apareceu na fila da Romaneio Freedom durante a observação. Ou a impressão não foi feita nessa impressora, "
+                "ou o servidor nem chegou a começar a enviar.")
+    partes = []
+    for id_, pts in docs.items():
+        max_b = max(b for _, _, b in pts)
+        ultimo_t = pts[-1][0]
+        cresceu_em = pts[0][0]
+        for (t1, _, b1), (t2, _, b2) in zip(pts, pts[1:]):
+            if b2 > b1:
+                cresceu_em = t2
+        status = pts[-1][1]
+        if ultimo_t < fim - 2:
+            partes.append(f"Documento {id_}: chegou ({max_b // 1024} KB) e saiu da fila em {ultimo_t} s, ou seja, terminou. "
+                          + ("O PDF chegou ao programa." if chegou_pdf else "Mas nenhum PDF chegou à pasta de entrada: veja o botão Testar impressora."))
+        elif fim - cresceu_em >= 20:
+            partes.append(f"Documento {id_}: chegou até {max_b // 1024} KB em {cresceu_em} s e PAROU de crescer; ficou em \"{status}\" até o fim da observação. "
+                          "O servidor parou de enviar no meio (ou o envio travou) antes de terminar. A impressora deste PC não é a causa.")
+        else:
+            partes.append(f"Documento {id_}: ainda estava chegando ({max_b // 1024} KB, status \"{status}\") quando a observação acabou. Observe de novo.")
+    return " ".join(partes)
 
 
 def script_instalar(exe, usuario):

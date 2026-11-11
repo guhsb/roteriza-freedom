@@ -4249,6 +4249,7 @@ function romaneioParse(pages){
     ov.querySelector('#imp-testar').disabled = s.ocupado || s.instalada !== true;
     ov.querySelector('#imp-reparar').disabled = s.ocupado || !s.exe;
     ov.querySelector('#imp-comparar').disabled = s.ocupado || !s.exe;
+    ov.querySelector('#imp-observar').disabled = s.ocupado || !s.exe;
     if(!s.exe) ov.querySelector('#imp-msg').textContent = 'A impressora só pode ser instalada pelo programa .exe.';
   }
   const escHtml = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -4292,6 +4293,7 @@ function romaneioParse(pages){
         <button class="btn btn-ghost" id="imp-testar">Testar impressora</button>
         <button class="btn btn-ghost" id="imp-reparar">Reparar impressão</button>
         <button class="btn btn-ghost" id="imp-comparar">Comparar com a Etiqueta Freedom</button>
+        <button class="btn btn-ghost" id="imp-observar">Observar a próxima impressão (150 s)</button>
         <button class="btn btn-ghost" id="imp-remover">Remover impressora</button>
         <button class="btn btn-ghost" id="imp-pasta">Abrir pasta dos dados</button>
         <button class="btn btn-ghost" id="imp-entrada">Abrir pasta da impressora</button>
@@ -4304,6 +4306,7 @@ function romaneioParse(pages){
     ov.querySelector('#imp-testar').onclick = async () => { await post('/api/impressora/testar'); pintar(); };
     ov.querySelector('#imp-reparar').onclick = async () => { if(confirm('Limpar a fila de impressão do Windows? Documentos que estiverem esperando em QUALQUER impressora serão cancelados.')){ await post('/api/impressora/reparar'); pintar(); } };
     ov.querySelector('#imp-comparar').onclick = async () => { await post('/api/impressora/comparar'); pintar(); };
+    ov.querySelector('#imp-observar').onclick = async () => { await post('/api/impressora/observar'); pintar(); };
     ov.querySelector('#imp-pasta').onclick = () => post('/api/abrir-pasta');
     ov.querySelector('#imp-entrada').onclick = () => post('/api/abrir-pasta?qual=entrada');
     ov.querySelector('#imp-sair').onclick = async () => { if(confirm('Encerrar o Roteiriza? (Imprimir um romaneio abre ele de novo sozinho.)')){ await post('/api/sair'); } };
